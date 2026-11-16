@@ -1,98 +1,73 @@
-// TENREC - Process ↔ Network Correlation Engine
+// TENREC - "What changed" tracking
+//
+// The first sample only seeds the known sets: everything already running when TENREC
+// starts is the baseline, not a change.
 use crate::network::types::{ConnectionInfo, ListeningPortInfo};
-use crate::processes::types::{ApplicationItem, ProcessItem};
+use crate::processes::types::ApplicationItem;
+use crate::util::LockExt;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Mutex;
+
+const MAX_LOG: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WhatChangedItem {
     pub id: String,
-    pub category: String, // "new_application" | "new_destination" | "traffic_spike" | "listening_port"
+    pub category: String, // "new_application" | "new_destination" | "listening_port"
     pub title: String,
     pub description: String,
+    /// RFC 3339
     pub timestamp: String,
     pub entity_name: String,
-    pub severity: String, // "info" | "attention" | "warning"
+    pub severity: String, // "info" | "attention"
 }
 
+#[derive(Default)]
+struct Inner {
+    seeded: bool,
+    apps: HashSet<String>,
+    destinations: HashSet<String>,
+    ports: HashSet<(String, u16, u32)>,
+    log: Vec<WhatChangedItem>,
+    seq: u64,
+}
+
+#[derive(Default)]
 pub struct CorrelationEngine {
-    known_applications: Mutex<HashSet<String>>,
-    known_destinations: Mutex<HashSet<String>>,
-    known_listening_ports: Mutex<HashSet<u16>>,
-    what_changed_log: Mutex<Vec<WhatChangedItem>>,
+    inner: Mutex<Inner>,
 }
 
 impl CorrelationEngine {
     pub fn new() -> Self {
-        Self {
-            known_applications: Mutex::new(HashSet::new()),
-            known_destinations: Mutex::new(HashSet::new()),
-            known_listening_ports: Mutex::new(HashSet::new()),
-            what_changed_log: Mutex::new(Vec::new()),
-        }
+        Self::default()
     }
 
-    pub fn correlate(
+    /// Records changes and marks connections to never-before-seen public addresses as new.
+    pub fn observe(
         &self,
-        processes: &mut [ProcessItem],
-        applications: &mut [ApplicationItem],
+        applications: &[ApplicationItem],
         connections: &mut [ConnectionInfo],
         listening: &[ListeningPortInfo],
     ) -> Vec<WhatChangedItem> {
+        let mut g = self.inner.lock_safe();
+        let now = Utc::now().to_rfc3339();
+        let seeding = !g.seeded;
         let mut changes = Vec::new();
-        let now = Utc::now().format("%H:%M:%S").to_string();
 
-        // 1. Build fast PID -> (ProcessName, AppName) map
-        let mut pid_to_app: HashMap<u32, (String, String)> = HashMap::new();
-        for p in processes.iter() {
-            pid_to_app.insert(p.pid, (p.name.clone(), p.application_name.clone()));
-        }
-
-        // 2. Correlate connections with process names and applications
-        let mut known_dests = self.known_destinations.lock().unwrap();
-        for conn in connections.iter_mut() {
-            if let Some((pname, aname)) = pid_to_app.get(&conn.pid) {
-                conn.process_name = pname.clone();
-                conn.application_name = aname.clone();
-            }
-
-            // Detect new remote destination
-            if conn.remote_address != "0.0.0.0" && conn.remote_address != "127.0.0.1" {
-                if !known_dests.contains(&conn.remote_address) {
-                    known_dests.insert(conn.remote_address.clone());
-                    conn.is_new = true;
-
-                    changes.push(WhatChangedItem {
-                        id: format!("change_dest_{}_{}", conn.remote_address, Utc::now().timestamp_millis()),
-                        category: "new_destination".to_string(),
-                        title: format!("New Destination Observed: {}", conn.remote_address),
-                        description: format!(
-                            "Application '{}' (PID {}) contacted {} for the first time.",
-                            conn.application_name, conn.pid, conn.remote_address
-                        ),
-                        timestamp: now.clone(),
-                        entity_name: conn.remote_address.clone(),
-                        severity: "info".to_string(),
-                    });
-                }
-            }
-        }
-
-        // 3. Track new Applications
-        let mut known_apps = self.known_applications.lock().unwrap();
-        for app in applications.iter() {
-            if !known_apps.contains(&app.name) {
-                known_apps.insert(app.name.clone());
+        for app in applications {
+            if g.apps.insert(app.id.clone()) && !seeding {
+                g.seq += 1;
                 changes.push(WhatChangedItem {
-                    id: format!("change_app_{}_{}", app.name, Utc::now().timestamp_millis()),
+                    id: format!("chg_{}", g.seq),
                     category: "new_application".to_string(),
-                    title: format!("New Application Observed: {}", app.name),
+                    title: format!("{} started", app.name),
                     description: format!(
-                        "Application '{}' detected with {} process(es) (Publisher: {}).",
-                        app.name, app.process_count, app.publisher
+                        "{} process(es){}",
+                        app.process_count,
+                        if app.executable_path.is_empty() { String::new() } else { format!(" from {}", app.executable_path) }
                     ),
                     timestamp: now.clone(),
                     entity_name: app.name.clone(),
@@ -101,42 +76,53 @@ impl CorrelationEngine {
             }
         }
 
-        // 4. Track new Listening Ports
-        let mut known_ports = self.known_listening_ports.lock().unwrap();
-        for port_info in listening.iter() {
-            if !known_ports.contains(&port_info.port) {
-                known_ports.insert(port_info.port);
+        for conn in connections.iter_mut().filter(|c| c.is_public_remote) {
+            if g.destinations.insert(conn.remote_address.clone()) && !seeding {
+                conn.is_new = true;
+                g.seq += 1;
                 changes.push(WhatChangedItem {
-                    id: format!("change_port_{}_{}", port_info.port, Utc::now().timestamp_millis()),
-                    category: "listening_port".to_string(),
-                    title: format!("New Listening Port: :{}", port_info.port),
-                    description: format!(
-                        "Process '{}' opened {} listening socket on {}:{}",
-                        port_info.process_name, port_info.protocol, port_info.bind_address, port_info.port
-                    ),
+                    id: format!("chg_{}", g.seq),
+                    category: "new_destination".to_string(),
+                    title: format!("New destination {}", conn.remote_address),
+                    description: format!("{} (PID {}) connected to {}:{}", conn.process_name, conn.pid, conn.remote_address, conn.remote_port),
                     timestamp: now.clone(),
-                    entity_name: format!(":{}", port_info.port),
-                    severity: if port_info.port < 1024 { "attention".to_string() } else { "info".to_string() },
+                    entity_name: conn.remote_address.clone(),
+                    severity: "info".to_string(),
                 });
             }
         }
 
-        // Append to history log
-        let mut log = self.what_changed_log.lock().unwrap();
-        log.extend(changes.clone());
-        if log.len() > 100 {
-            let keep_from = log.len() - 100;
-            *log = log[keep_from..].to_vec();
+        for p in listening {
+            let key = (p.protocol.clone(), p.port, p.pid);
+            if g.ports.insert(key) && !seeding {
+                g.seq += 1;
+                changes.push(WhatChangedItem {
+                    id: format!("chg_{}", g.seq),
+                    category: "listening_port".to_string(),
+                    title: format!("{} now listening on {} {}", p.process_name, p.protocol, p.port),
+                    description: format!(
+                        "Bound to {}{}",
+                        p.bind_address,
+                        if p.all_interfaces { " (all interfaces: reachable from the network unless firewalled)" } else { "" }
+                    ),
+                    timestamp: now.clone(),
+                    entity_name: format!("{}:{}", p.protocol, p.port),
+                    severity: if p.all_interfaces && p.protocol == "TCP" { "attention" } else { "info" }.to_string(),
+                });
+            }
         }
 
-        let mut res = log.clone();
-        res.reverse();
-        res
+        g.seeded = true;
+        g.log.extend(changes.iter().cloned());
+        let len = g.log.len();
+        if len > MAX_LOG {
+            g.log.drain(..len - MAX_LOG);
+        }
+        changes
     }
 
     pub fn get_what_changed(&self) -> Vec<WhatChangedItem> {
-        let mut log = self.what_changed_log.lock().unwrap().clone();
-        log.reverse();
-        log
+        let g = self.inner.lock_safe();
+        g.log.iter().rev().cloned().collect()
     }
 }

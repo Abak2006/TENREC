@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetLogicalDrives, GetVolumeInformationW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,9 +22,10 @@ pub struct DiskDrive {
 #[serde(rename_all = "camelCase")]
 pub struct DiskMetrics {
     pub drives: Vec<DiskDrive>,
-    pub read_bytes_sec: u64,
-    pub write_bytes_sec: u64,
 }
+
+const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_FIXED: u32 = 3;
 
 pub fn collect_disk_metrics() -> DiskMetrics {
     let mut drives = Vec::new();
@@ -36,6 +37,13 @@ pub fn collect_disk_metrics() -> DiskMetrics {
                 let letter = (b'A' + i) as char;
                 let root_str = format!("{}:\\\0", letter);
                 let wide_root: Vec<u16> = root_str.encode_utf16().collect();
+
+                // Skip network, optical and RAM drives: querying a disconnected
+                // network share can block for many seconds.
+                let drive_type = GetDriveTypeW(wide_root.as_ptr());
+                if drive_type != DRIVE_FIXED && drive_type != DRIVE_REMOVABLE {
+                    continue;
+                }
 
                 let mut free_bytes_caller: u64 = 0;
                 let mut total_bytes: u64 = 0;
@@ -78,7 +86,7 @@ pub fn collect_disk_metrics() -> DiskMetrics {
                         let len = fs_buf.iter().position(|&c| c == 0).unwrap_or(0);
                         OsString::from_wide(&fs_buf[..len]).to_string_lossy().to_string()
                     } else {
-                        "NTFS".to_string()
+                        String::new()
                     };
 
                     drives.push(DiskDrive {
@@ -95,9 +103,5 @@ pub fn collect_disk_metrics() -> DiskMetrics {
         }
     }
 
-    DiskMetrics {
-        drives,
-        read_bytes_sec: 0,
-        write_bytes_sec: 0,
-    }
+    DiskMetrics { drives }
 }

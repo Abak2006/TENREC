@@ -1,201 +1,258 @@
-// TENREC - Comprehensive Native Subsystem Tests
-use tenrec_lib::baseline::BaselineEngine;
+// TENREC - Integration tests against the real Windows APIs
+use std::process::{Child, Command};
+use std::sync::Arc;
 use tenrec_lib::correlation::CorrelationEngine;
+use tenrec_lib::hardware::registry::HardwareRegistry;
+use tenrec_lib::hardware::types::{AccessMode, CapabilityState};
 use tenrec_lib::network::types::{ConnectionInfo, ListeningPortInfo};
 use tenrec_lib::persistence::Database;
-use tenrec_lib::processes::types::ProcessItem;
-use tenrec_lib::protection::firewall::TENREC_RULE_PREFIX;
+use tenrec_lib::processes::types::{ApplicationItem, ProcessItem};
+use tenrec_lib::protection::process_ctrl::{creation_time, get_priority_class, IDLE};
+use tenrec_lib::protection::types::{ChangeStatus, SnapshotStatus};
 use tenrec_lib::protection::ProtectionManager;
-use tenrec_lib::security::types::{ActionRisk, IncidentSeverity, ProposedAction};
+use tenrec_lib::security::types::{ActionRisk, ActionTarget, IncidentSeverity, ProposedAction};
 use tenrec_lib::security::SecurityEngine;
-use tenrec_lib::system::SystemManager;
-use std::sync::Arc;
+use tenrec_lib::system::{IoMetrics, SystemManager};
+use tenrec_lib::telemetry::{Collectors, TelemetryHub};
 
-#[test]
-fn test_system_snapshot_real_telemetry() {
-    let sys = SystemManager::new();
-    let snapshot = sys.snapshot();
-
-    // Invariant: telemetry must reflect real host values
-    assert!(!snapshot.hostname.is_empty(), "Hostname must not be empty");
-    assert!(!snapshot.os_name.is_empty(), "OS name must not be empty");
-    assert!(snapshot.cpu.core_count > 0, "Host must have at least 1 core");
-    assert!(snapshot.cpu.logical_core_count >= snapshot.cpu.core_count);
-    assert!(snapshot.memory.total_bytes > 0, "RAM total bytes must be positive");
-    assert!(snapshot.memory.used_bytes > 0, "RAM used bytes must be positive");
-    assert!(snapshot.memory.usage_percent >= 0.0 && snapshot.memory.usage_percent <= 100.0);
-    assert!(!snapshot.disk.drives.is_empty(), "At least one drive volume must be mounted");
-}
-
-#[test]
-fn test_baseline_engine_learning_and_divergence() {
-    let baseline = BaselineEngine::new();
-    let app = "chrome.exe";
-
-    // First sample -> status should be 'learning'
-    baseline.record_sample(app, 5.0, 500_000_000, 10_000.0);
-    assert_eq!(baseline.get_status(app), "learning");
-
-    // Add 10 samples to exit learning
-    for _ in 0..10 {
-        baseline.record_sample(app, 5.0, 500_000_000, 10_000.0);
+/// A harmless long-running child process we are allowed to control.
+struct TestChild(Child);
+impl TestChild {
+    fn spawn() -> Self {
+        Self(Command::new("ping").args(["-n", "60", "127.0.0.1"]).spawn().expect("spawn ping"))
     }
-    assert_eq!(baseline.get_status(app), "normal");
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+impl Drop for TestChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
-    // Extreme divergence (CPU 95%, Network 100 MB/s)
-    baseline.record_sample(app, 95.0, 500_000_000, 100_000_000.0);
-    assert_eq!(baseline.get_status(app), "divergent");
+fn temp_db() -> (Arc<Database>, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("tenrec_test_{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.db");
+    (Arc::new(Database::open(&path).expect("open test db")), dir)
+}
+
+fn process(pid: u32, name: &str, path: &str) -> ProcessItem {
+    ProcessItem {
+        pid,
+        ppid: None,
+        name: name.to_string(),
+        executable_path: path.to_string(),
+        company: None,
+        application_id: format!("app_{name}"),
+        application_name: name.to_string(),
+        cpu_percent: 0.0,
+        memory_bytes: 1,
+        memory_percent: 0.0,
+        io_read_bps: 0,
+        io_write_bps: 0,
+        connection_count: 1,
+        start_time: String::new(),
+        runs_from_user_writable_location: false,
+        restricted: false,
+    }
+}
+
+fn connection(pid: u32, name: &str, remote: &str, public: bool) -> ConnectionInfo {
+    ConnectionInfo {
+        id: format!("c_{pid}_{remote}"),
+        pid,
+        process_name: name.to_string(),
+        application_name: name.to_string(),
+        protocol: "TCP".to_string(),
+        ip_version: 4,
+        local_address: "192.168.1.10".to_string(),
+        local_port: 50000,
+        remote_address: remote.to_string(),
+        remote_port: 443,
+        state: "ESTABLISHED".to_string(),
+        is_public_remote: public,
+        is_new: false,
+    }
 }
 
 #[test]
-fn test_security_engine_and_recommendation_classification() {
-    let sec = SecurityEngine::new();
-    let baseline = BaselineEngine::new();
+fn system_snapshot_reports_real_values() {
+    let mut sys = SystemManager::new();
+    let s = sys.snapshot(IoMetrics::default());
+    assert!(!s.hostname.is_empty());
+    assert!(s.cpu.logical_core_count >= s.cpu.core_count && s.cpu.core_count > 0);
+    assert!(s.memory.total_bytes > 0 && s.memory.used_bytes > 0);
+    assert!((0.0..=100.0).contains(&s.memory.usage_percent));
+    assert!(!s.disk.drives.is_empty(), "the system drive must be listed");
+}
 
-    let procs = vec![
-        ProcessItem {
-            pid: 1234,
-            ppid: Some(4),
-            name: "powershell.exe".to_string(),
-            executable_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe".to_string(),
-            publisher: "Microsoft Corporation".to_string(),
-            cpu_percent: 12.5,
-            memory_bytes: 45_000_000,
-            memory_percent: 0.5,
-            net_upload_bps: 20_000,
-            net_download_bps: 10_000,
-            connection_count: 1,
-            start_time: "2026-09-26T04:00:00Z".to_string(),
-            is_elevated: false,
-            application_name: "Windows PowerShell".to_string(),
-        },
-    ];
+#[test]
+fn sampler_collects_processes_sockets_and_names() {
+    let hub = TelemetryHub::new();
+    let mut c = Collectors::new();
+    hub.tick(&mut c);
+    let s = hub.tick(&mut c);
+    assert_eq!(s.sequence, 2);
+    assert!(s.processes.len() > 10, "a Windows host runs many processes");
+    let me = s.processes.iter().find(|p| p.pid == std::process::id()).expect("own process listed");
+    assert!(!me.executable_path.is_empty());
+    for p in &s.processes {
+        assert!((0.0..=100.0).contains(&p.cpu_percent), "{} cpu {}", p.name, p.cpu_percent);
+    }
+    // Sockets must carry real process names, not placeholder PIDs, when the owner is readable.
+    let named = s.listening.iter().filter(|l| !l.process_name.starts_with("PID ")).count();
+    assert!(named > 0, "at least some listeners resolve to a process name");
+    assert!(s.system.is_some() && s.throughput.is_some());
+}
 
-    let conns = vec![
-        ConnectionInfo {
-            id: "conn_1".to_string(),
-            pid: 1234,
-            process_name: "powershell.exe".to_string(),
-            application_name: "Windows PowerShell".to_string(),
-            protocol: "TCP".to_string(),
-            local_address: "192.168.1.100".to_string(),
-            local_port: 54321,
-            remote_address: "198.51.100.42".to_string(), // Public IP
-            remote_port: 443,
-            state: "ESTABLISHED".to_string(),
-            hostname: "198.51.100.42".to_string(),
-            bytes_sent: 5000,
-            bytes_received: 20000,
-            first_seen: "2026-09-26T04:00:00Z".to_string(),
-            last_seen: "2026-09-26T04:00:05Z".to_string(),
-            is_unusual: true,
-            is_new: true,
-        },
-    ];
-
+#[test]
+fn correlation_seeds_silently_then_reports_new_items() {
+    let engine = CorrelationEngine::new();
+    let apps: Vec<ApplicationItem> = vec![];
     let listening: Vec<ListeningPortInfo> = vec![];
 
-    sec.analyze(&procs, &conns, &listening, &baseline);
+    let mut first = vec![connection(42, "a.exe", "93.184.216.34", true)];
+    assert!(engine.observe(&apps, &mut first, &listening).is_empty(), "startup state is not a change");
+
+    let mut second = vec![connection(42, "a.exe", "93.184.216.34", true), connection(42, "a.exe", "151.101.1.69", true)];
+    let changes = engine.observe(&apps, &mut second, &listening);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].category, "new_destination");
+    assert!(second[1].is_new && !second[0].is_new);
+
+    // Private destinations are not tracked.
+    let mut third = vec![connection(42, "a.exe", "10.0.0.5", false)];
+    assert!(engine.observe(&apps, &mut third, &listening).is_empty());
+}
+
+#[test]
+fn script_host_public_connection_raises_incident_with_safe_and_risky_actions() {
+    let child = TestChild::spawn();
+    let sec = SecurityEngine::new();
+    let procs = vec![process(child.pid(), "powershell.exe", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")];
+    let conns = vec![connection(child.pid(), "powershell.exe", "198.51.100.42", true)];
+
+    sec.analyze(&procs, &conns, &[]);
+    sec.analyze(&procs, &conns, &[]);
 
     let incidents = sec.get_incidents();
-    assert_eq!(incidents.len(), 1, "Powershell outbound to public IP must trigger an incident");
+    assert_eq!(incidents.len(), 1, "the same condition is one incident, not one per sample");
     assert_eq!(incidents[0].severity, IncidentSeverity::High);
-    assert!(!incidents[0].evidence.is_empty(), "Evidence list must be populated");
+    assert_eq!(incidents[0].observation_count, 2);
 
     let actions = sec.get_proposed_actions(Some(&incidents[0].id));
-    assert_eq!(actions.len(), 2, "Must propose both SAFE and RISKY actions");
+    let safe = actions.iter().find(|a| a.risk == ActionRisk::Safe).expect("safe action");
+    assert!(safe.default_selected);
+    assert_eq!(safe.target, ActionTarget::BlockRemoteIp { ip: "198.51.100.42".into() });
+    let risky = actions.iter().find(|a| a.risk == ActionRisk::Risky).expect("risky action");
+    assert!(!risky.default_selected);
+    assert!(matches!(risky.target, ActionTarget::SuspendProcess { pid, .. } if pid == child.pid()));
 
-    let safe_action = actions.iter().find(|a| a.risk == ActionRisk::Safe).expect("Must have a SAFE action");
-    assert!(safe_action.default_selected, "SAFE action MUST be default_selected: true");
-    assert!(safe_action.selected, "SAFE action MUST be selected: true");
-
-    let risky_action = actions.iter().find(|a| a.risk == ActionRisk::Risky).expect("Must have a RISKY action");
-    assert!(!risky_action.default_selected, "RISKY action MUST be default_selected: false");
-    assert!(!risky_action.selected, "RISKY action MUST be selected: false");
+    // Private destinations never raise this incident.
+    let sec2 = SecurityEngine::new();
+    sec2.analyze(&procs, &[connection(child.pid(), "powershell.exe", "192.168.1.1", false)], &[]);
+    assert!(sec2.get_incidents().is_empty());
 }
 
 #[test]
-fn test_protection_rule_prefix_and_snapshot_lifecycle() {
-    let temp_dir = std::env::temp_dir().join(format!("tenrec_test_{}", uuid::Uuid::new_v4()));
-    let _ = std::fs::create_dir_all(&temp_dir);
-    let db_path = temp_dir.join("test.db");
+fn prepare_process_action_refuses_protected_and_missing_processes() {
+    let sec = SecurityEngine::new();
+    let procs = vec![process(700, "lsass.exe", r"C:\Windows\System32\lsass.exe")];
+    assert!(sec.prepare_process_action(&procs, 700, "suspend").is_err());
+    assert!(sec.prepare_process_action(&procs, 99999, "priority").is_err());
+    let child = TestChild::spawn();
+    let procs = vec![process(child.pid(), "PING.EXE", r"C:\Windows\System32\PING.EXE")];
+    assert!(sec.prepare_process_action(&procs, child.pid(), "terminate").is_err(), "unknown kinds are rejected");
+    let a = sec.prepare_process_action(&procs, child.pid(), "priority").expect("priority action");
+    assert!(sec.get_action(&a.id).is_some(), "prepared actions are registered for apply-by-id");
+}
 
-    let db = Arc::new(Database::open(&db_path).expect("Failed to open test SQLite database"));
+#[test]
+fn priority_change_is_applied_persisted_and_undone() {
+    let child = TestChild::spawn();
+    let pid = child.pid();
+    let before = get_priority_class(pid).expect("read priority");
+    let (db, dir) = temp_db();
     let mgr = ProtectionManager::new(db.clone());
 
-    // Verify rule prefix invariant
-    assert_eq!(TENREC_RULE_PREFIX, "TENREC_RULE_");
+    let action = ProposedAction {
+        id: "t1".into(),
+        incident_id: None,
+        title: "lower".into(),
+        description: String::new(),
+        risk: ActionRisk::Safe,
+        expected_benefit: String::new(),
+        potential_consequence: String::new(),
+        requires_admin: false,
+        default_selected: true,
+        target: ActionTarget::LowerPriority { pid, process_name: "PING.EXE".into(), creation_time: creation_time(pid).unwrap() },
+    };
+    let bad_ip = ProposedAction {
+        id: "t2".into(),
+        target: ActionTarget::BlockRemoteIp { ip: "192.168.0.1".into() },
+        ..action.clone()
+    };
+    let res = mgr.apply(vec![action, bad_ip]);
+    assert!(res.outcomes[0].success, "{:?}", res.outcomes[0].error);
+    assert!(!res.outcomes[1].success, "private IPs are refused before reaching netsh");
+    assert_eq!(get_priority_class(pid).unwrap(), IDLE);
+    let snap_id = res.snapshot_id.expect("snapshot recorded");
+    assert_eq!(mgr.get_active_policies().len(), 1);
 
-    let actions = vec![
-        ProposedAction {
-            id: "act_test_1".to_string(),
-            incident_id: None,
-            title: "Block test endpoint".to_string(),
-            description: "Test description".to_string(),
-            risk: ActionRisk::Safe,
-            rationale: "Testing protection".to_string(),
-            expected_benefit: "Verification".to_string(),
-            potential_consequence: "None".to_string(),
-            current_state: "Open".to_string(),
-            proposed_state: "Blocked".to_string(),
-            is_reversible: true,
-            default_selected: true,
-            selected: true,
-            duration_minutes: 0,
-            target_type: "firewall_rule".to_string(),
-            target_identifier: "203.0.113.10".to_string(),
-        }
-    ];
+    // Undo history survives a restart.
+    let reopened = ProtectionManager::new(db.clone());
+    assert_eq!(reopened.get_snapshots().len(), 1);
 
-    let apply_res = mgr.apply_approved_actions(actions);
-    // Even if netsh requires admin in test environment and fails gracefully, snapshot record is created
-    assert!(!apply_res.snapshot_id.is_empty());
+    let r = reopened.restore_snapshot(&snap_id).unwrap();
+    assert_eq!((r.restored, r.failed), (1, 0));
+    assert_eq!(get_priority_class(pid).unwrap(), before, "previous priority is restored");
+    let snap = &reopened.get_snapshots()[0];
+    assert_eq!(snap.status, SnapshotStatus::Restored);
+    assert_eq!(snap.changes[0].status, ChangeStatus::Restored);
+    assert!(reopened.get_active_policies().is_empty());
 
-    let snapshots = mgr.get_snapshots();
-    assert_eq!(snapshots.len(), 1);
-
-    // Test rollback
-    let restore_res = mgr.restore_snapshot(&apply_res.snapshot_id);
-    assert!(restore_res.success);
-
-    // Verify audit log
-    let audit = db.get_audit_log(10).expect("Must fetch audit log");
-    assert!(!audit.is_empty(), "Audit entries must be recorded");
-    assert!(audit.iter().any(|e| e.actor == "USER_EXPLICIT_APPROVAL"));
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    let audit = db.get_audit_log(10).unwrap();
+    assert!(audit.iter().any(|e| e.action_type == "apply_action" && e.success));
+    assert!(audit.iter().any(|e| e.action_type == "apply_action" && !e.success));
+    drop(db);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn test_correlation_engine_tracks_new_destinations() {
-    let correlation = CorrelationEngine::new();
-    let mut procs = vec![];
-    let mut apps = vec![];
-    let mut conns = vec![
-        ConnectionInfo {
-            id: "c1".to_string(),
-            pid: 42,
-            process_name: "test.exe".to_string(),
-            application_name: "TestApp".to_string(),
-            protocol: "TCP".to_string(),
-            local_address: "127.0.0.1".to_string(),
-            local_port: 5000,
-            remote_address: "93.184.216.34".to_string(),
-            remote_port: 80,
-            state: "ESTABLISHED".to_string(),
-            hostname: "example.com".to_string(),
-            bytes_sent: 100,
-            bytes_received: 200,
-            first_seen: "2026-09-26T04:00:00Z".to_string(),
-            last_seen: "2026-09-26T04:00:01Z".to_string(),
-            is_unusual: false,
-            is_new: false,
-        }
-    ];
-    let listening = vec![];
+fn stale_pid_is_not_touched() {
+    let (db, dir) = temp_db();
+    let mgr = ProtectionManager::new(db);
+    let child = TestChild::spawn();
+    let pid = child.pid();
+    let wrong_identity = creation_time(pid).unwrap() + 1;
+    let res = mgr.apply(vec![ProposedAction {
+        id: "t".into(),
+        incident_id: None,
+        title: "suspend".into(),
+        description: String::new(),
+        risk: ActionRisk::Risky,
+        expected_benefit: String::new(),
+        potential_consequence: String::new(),
+        requires_admin: false,
+        default_selected: false,
+        target: ActionTarget::SuspendProcess { pid, process_name: "PING.EXE".into(), creation_time: wrong_identity },
+    }]);
+    assert!(!res.outcomes[0].success);
+    assert!(res.snapshot_id.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
 
-    let changes = correlation.correlate(&mut procs, &mut apps, &mut conns, &listening);
-    assert!(!changes.is_empty(), "New remote destination must generate a WhatChanged item");
-    assert_eq!(changes[0].category, "new_destination");
-    assert_eq!(changes[0].entity_name, "93.184.216.34");
+#[test]
+fn capability_list_is_honest() {
+    let diag = HardwareRegistry::get_diagnostics();
+    assert!(!diag.cpu_name.is_empty() && diag.total_memory_bytes > 0);
+    let caps = HardwareRegistry::get_capabilities(&diag);
+    assert!(caps.iter().any(|c| c.access_mode == AccessMode::ReadWrite));
+    for id in ["per_process_network", "gpu_metrics", "cpu_temperature"] {
+        let c = caps.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(c.state, CapabilityState::NotImplemented, "{id} must not claim to work");
+    }
 }

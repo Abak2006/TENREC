@@ -1,30 +1,22 @@
-# TENREC Windows Platform Engineering Guide
+# Windows APIs used
 
-## 1. Supported Versions
-- Primary Target: **Windows 11 (64-bit)**
-- Compatible: **Windows 10 (Build 19041+)**
+| Area | API | Notes |
+|---|---|---|
+| CPU total | `GetSystemTimes` | Delta of idle vs kernel+user time |
+| CPU per core, per process | sysinfo (PDH / `GetProcessTimes`) | Per-process value divided by logical cores |
+| Process I/O | sysinfo (`GetProcessIoCounters`) | Includes file, device and network I/O |
+| Process identity | `GetProcessTimes` (creation time) | Guards against PID reuse |
+| Executable metadata | `GetFileVersionInfoW`, `VerQueryValueW` | CompanyName / FileDescription, not signature-verified |
+| Memory | `GlobalMemoryStatusEx` | |
+| Drives | `GetLogicalDrives`, `GetDriveTypeW`, `GetDiskFreeSpaceExW`, `GetVolumeInformationW` | Fixed and removable drives only (network drives can block) |
+| Power | `GetSystemPowerStatus` | |
+| Sockets | `GetExtendedTcpTable`, `GetExtendedUdpTable` | `AF_INET` and `AF_INET6`, owner PID tables |
+| Interface throughput | sysinfo (`GetIfTable2`) | Sum over all adapters |
+| Hardware identity | Registry `HKLM\HARDWARE\DESCRIPTION\System\BIOS`, display class key | |
+| Elevation | `OpenProcessToken`, `GetTokenInformation(TokenElevation)` | |
+| Priority | `GetPriorityClass`, `SetPriorityClass` | Previous class stored for undo |
+| Suspend / resume | `NtSuspendProcess`, `NtResumeProcess` (ntdll) | Undocumented but long-stable |
+| Firewall | `netsh advfirewall firewall add/delete rule` | Rules named `TENREC_RULE_*` only |
+| Firewall cleanup | PowerShell `Get-NetFirewallRule -DisplayName 'TENREC_RULE_*' \| Remove-NetFirewallRule` | Fixed script; admin only |
 
-## 2. Real Windows APIs Used
-TENREC relies exclusively on real, stable Windows APIs:
-
-- **CPU Telemetry:**
-  - `GetSystemTimes` for precise kernel and user time ticks.
-  - Performance counters via sysinfo.
-- **Memory Telemetry:**
-  - `GlobalMemoryStatusEx` (`MEMORYSTATUSEX`) for total physical RAM, available RAM, and memory load percentage.
-- **Storage / Disk Telemetry:**
-  - `GetDiskFreeSpaceExW` for real byte-accurate volume capacity and free space.
-  - `GetLogicalDriveStringsW` for enumerating active logical drives.
-- **Power & Battery:**
-  - `GetSystemPowerStatus` (`SYSTEM_POWER_STATUS`) for AC line status, battery flag, and battery life percentage.
-- **Network Telemetry:**
-  - `GetExtendedTcpTable` (`MIB_TCPTABLE_OWNER_PID`) for mapping active TCP connections to owning PIDs.
-  - `GetExtendedUdpTable` (`MIB_UDPTABLE_OWNER_PID`) for mapping active UDP endpoints to owning PIDs.
-  - `GetIfTable2` / `MIB_IF_ROW2` for network interface throughput (InOctets, OutOctets, Discards, Errors).
-- **Process Management:**
-  - `CreateToolhelp32Snapshot`, `Process32FirstW`, `Process32NextW` for process enumeration and parent PID tracking.
-  - `OpenProcess`, `GetProcessMemoryInfo` for process working set and memory.
-  - `QueryFullProcessImageNameW` for executable binary paths.
-- **Protection & Firewall:**
-  - Windows Advanced Firewall (`netsh advfirewall firewall`) with strictly prefixed rules (`TENREC_RULE_*`).
-  - Native process thread control APIs (`OpenProcess`, `NtSuspendProcess`, `NtResumeProcess`) for safe process control with elevation checks.
+Without administrator rights, `OpenProcess` is denied for most service and system processes. TENREC then cannot read their path, CPU or I/O, and marks them as restricted ("n/a") instead of showing 0.

@@ -1,5 +1,7 @@
 // TENREC - SQLite Database Connection & Operations
 use crate::persistence::schema::*;
+use crate::protection::types::RestorationSnapshot;
+use crate::util::LockExt;
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -22,8 +24,7 @@ pub struct AuditEntry {
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseStats {
     pub sample_count: i64,
-    pub connection_count: i64,
-    pub incident_count: i64,
+    pub snapshot_count: i64,
     pub audit_count: i64,
     pub file_size_bytes: u64,
     pub db_path: String,
@@ -36,10 +37,11 @@ pub struct Database {
 
 impl Database {
     pub fn init_default() -> Result<Self> {
+        // Per-user location only: never fall back to a shared folder like ProgramData.
         let app_data = std::env::var("LOCALAPPDATA")
-            .unwrap_or_else(|_| "C:\\ProgramData".to_string());
+            .map_err(|_| rusqlite::Error::InvalidPath(PathBuf::from("%LOCALAPPDATA% is not set")))?;
         let dir = Path::new(&app_data).join("TENREC");
-        let _ = fs::create_dir_all(&dir);
+        fs::create_dir_all(&dir).map_err(|_| rusqlite::Error::InvalidPath(dir.clone()))?;
         let db_path = dir.join("tenrec.db");
 
         Self::open(&db_path)
@@ -60,10 +62,7 @@ impl Database {
 
         // Execute table schemas
         conn.execute_batch(CREATE_SYSTEM_SAMPLES_TABLE)?;
-        conn.execute_batch(CREATE_NETWORK_CONNECTIONS_TABLE)?;
-        conn.execute_batch(CREATE_SECURITY_INCIDENTS_TABLE)?;
-        conn.execute_batch(CREATE_ACTIVE_POLICIES_TABLE)?;
-        conn.execute_batch(CREATE_RESTORATION_SNAPSHOTS_TABLE)?;
+        conn.execute_batch(CREATE_PROTECTION_SNAPSHOTS_TABLE)?;
         conn.execute_batch(CREATE_AUDIT_LOG_TABLE)?;
 
         Ok(Self {
@@ -72,6 +71,7 @@ impl Database {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_system_sample(
         &self,
         timestamp: &str,
@@ -85,7 +85,7 @@ impl Database {
         battery_percent: Option<f32>,
         ac_connected: bool,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock_safe();
         conn.execute(
             r#"
             INSERT INTO system_samples (
@@ -118,7 +118,7 @@ impl Database {
         details: &str,
         success: bool,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock_safe();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             r#"
@@ -138,7 +138,7 @@ impl Database {
     }
 
     pub fn get_audit_log(&self, limit: usize) -> Result<Vec<AuditEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock_safe();
         let mut stmt = conn.prepare(
             r#"
             SELECT id, timestamp, actor, action_type, target, details, success
@@ -168,18 +168,16 @@ impl Database {
     }
 
     pub fn get_database_stats(&self) -> Result<DatabaseStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock_safe();
         let sample_count: i64 = conn.query_row("SELECT COUNT(*) FROM system_samples", [], |r| r.get(0))?;
-        let connection_count: i64 = conn.query_row("SELECT COUNT(*) FROM network_connections", [], |r| r.get(0))?;
-        let incident_count: i64 = conn.query_row("SELECT COUNT(*) FROM security_incidents", [], |r| r.get(0))?;
+        let snapshot_count: i64 = conn.query_row("SELECT COUNT(*) FROM protection_snapshots", [], |r| r.get(0))?;
         let audit_count: i64 = conn.query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))?;
 
         let file_size_bytes = fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0);
 
         Ok(DatabaseStats {
             sample_count,
-            connection_count,
-            incident_count,
+            snapshot_count,
             audit_count,
             file_size_bytes,
             db_path: self.db_path.to_string_lossy().to_string(),
@@ -187,7 +185,7 @@ impl Database {
     }
 
     pub fn purge_old_telemetry(&self, retention_hours: u32) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock_safe();
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(retention_hours as i64)).to_rfc3339();
 
         let samples_deleted = conn.execute(
@@ -195,11 +193,43 @@ impl Database {
             params![cutoff],
         )?;
 
-        let _ = conn.execute(
-            "DELETE FROM network_connections WHERE last_seen < ?1",
-            params![cutoff],
-        )?;
 
         Ok(samples_deleted)
+    }
+
+    pub fn save_snapshot(&self, snap: &RestorationSnapshot) -> Result<()> {
+        let changes = serde_json::to_string(&snap.changes).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let status = serde_json::to_value(snap.status)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        self.conn.lock_safe().execute(
+            "INSERT INTO protection_snapshots (id, timestamp, title, status, changes_json) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET status = excluded.status, changes_json = excluded.changes_json",
+            params![snap.id, snap.timestamp, snap.title, status, changes],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_snapshots(&self) -> Result<Vec<RestorationSnapshot>> {
+        let conn = self.conn.lock_safe();
+        let mut stmt = conn.prepare("SELECT id, timestamp, title, status, changes_json FROM protection_snapshots ORDER BY timestamp")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, timestamp, title, status, changes_json) = row?;
+            // Skip rows written by an incompatible version rather than failing startup.
+            let (Ok(changes), Ok(status)) = (
+                serde_json::from_str(&changes_json),
+                serde_json::from_value(serde_json::Value::String(status)),
+            ) else {
+                log::warn!("Skipping unreadable snapshot {id}");
+                continue;
+            };
+            out.push(RestorationSnapshot { id, timestamp, title, changes, status });
+        }
+        Ok(out)
     }
 }

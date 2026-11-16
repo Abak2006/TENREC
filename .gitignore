@@ -29,3 +29,5 @@ src-tauri/target/
 *.db
 *.db-wal
 *.db-shm
+*.exe
+out.txt
