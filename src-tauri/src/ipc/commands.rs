@@ -269,3 +269,20 @@ pub fn set_task_enabled(state: State<'_, AppState>, path: String, enabled: bool)
     let description = change.description.clone();
     Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
 }
+
+#[tauri::command(async)]
+pub fn get_privacy_settings() -> Vec<crate::controls::privacy::PrivacySetting> {
+    crate::controls::privacy::list()
+}
+
+#[tauri::command(async)]
+pub fn set_privacy_setting(state: State<'_, AppState>, id: String, private: bool) -> Result<SettingChangeResult, String> {
+    let change = crate::controls::privacy::set_private(&id, private)?;
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command]
+pub fn get_privacy_evidence(state: State<'_, AppState>) -> crate::controls::privacy::PrivacyEvidence {
+    state.hub.privacy.snapshot()
+}

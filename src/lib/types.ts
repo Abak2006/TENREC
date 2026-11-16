@@ -81,6 +81,7 @@ export interface ConnectionInfo {
   localPort: number;
   remoteAddress: string;
   remotePort: number;
+  hostname: string | null;
   state: string;
   isPublicRemote: boolean;
   isNew: boolean;
@@ -99,6 +100,7 @@ export interface ListeningPortInfo {
 
 export interface TopDestination {
   destination: string;
+  hostname: string | null;
   applications: string[];
   openConnections: number;
   timesSeen: number;
@@ -347,4 +349,30 @@ export interface ScheduledTaskItem {
 export interface SettingChangeResult {
   snapshotId: string;
   description: string;
+}
+
+export interface PrivacySetting {
+  id: string;
+  title: string;
+  description: string;
+  note: string | null;
+  location: string;
+  source: 'settings_app' | 'group_policy';
+  isPrivate: boolean;
+  currentValue: number | null;
+  requiresAdmin: boolean;
+}
+
+export interface TelemetryObservation {
+  hostname: string;
+  processes: string[];
+  samplesSeen: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface PrivacyEvidence {
+  since: string;
+  hostnamesKnown: number;
+  observations: TelemetryObservation[];
 }

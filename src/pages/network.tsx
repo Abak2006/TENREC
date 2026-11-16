@@ -18,17 +18,17 @@ export function NetworkPage() {
   const match = (...fields: (string | number)[]) => !q || fields.some((f) => String(f).toLowerCase().includes(q));
 
   const conns = connections
-    .filter((c) => (!publicOnly || c.isPublicRemote) && match(c.processName, c.applicationName, c.remoteAddress, c.remotePort, c.pid))
+    .filter((c) => (!publicOnly || c.isPublicRemote) && match(c.processName, c.applicationName, c.remoteAddress, c.remotePort, c.pid, c.hostname ?? ''))
     .sort((a, b) => Number(b.isNew) - Number(a.isNew) || a.processName.localeCompare(b.processName));
   const ports = listening.filter((l) => (!exposedOnly || l.allInterfaces) && match(l.processName, l.port, l.bindAddress, l.pid));
-  const dests = destinations.filter((d) => match(d.destination, ...d.applications));
+  const dests = destinations.filter((d) => match(d.destination, d.hostname ?? '', ...d.applications));
   const publicCount = connections.filter((c) => c.isPublicRemote).length;
 
   return (
     <>
       <PageHeader
         title="Network"
-        description="Live TCP connections and listening ports with the process that owns them, IPv4 and IPv6. Hostnames are not looked up, so nothing is sent on your behalf."
+        description="Live TCP connections and listening ports with the process that owns them, IPv4 and IPv6. Hostnames come from Windows' own DNS cache; TENREC never sends DNS queries itself."
         actions={<SearchInput value={query} onChange={setQuery} placeholder="Filter by process, address or port" label="Filter network" />}
       />
 
@@ -74,7 +74,10 @@ export function NetworkPage() {
                     </div>
                     <div className="text-xs text-muted-foreground">PID {c.pid} · {c.applicationName}</div>
                   </Td>
-                  <Td mono>{endpoint(c.remoteAddress, c.remotePort)}</Td>
+                  <Td mono>
+                    {endpoint(c.remoteAddress, c.remotePort)}
+                    {c.hostname && <div className="font-sans text-xs text-muted-foreground">{c.hostname}</div>}
+                  </Td>
                   <Td mono className="hidden text-muted-foreground xl:table-cell">{endpoint(c.localAddress, c.localPort)}</Td>
                   <Td><Tag>{c.state.toLowerCase().replace('_', ' ')}</Tag></Td>
                 </tr>
@@ -132,7 +135,10 @@ export function NetworkPage() {
             <tbody>
               {dests.map((d) => (
                 <tr key={d.destination}>
-                  <Td mono>{d.destination}</Td>
+                  <Td mono>
+                    {d.destination}
+                    {d.hostname && <div className="font-sans text-xs text-muted-foreground">{d.hostname}</div>}
+                  </Td>
                   <Td className="max-w-96 truncate">{d.applications.join(', ')}</Td>
                   <Td align="right">{d.openConnections || '–'}</Td>
                   <Td align="right" className="text-muted-foreground">{formatRelative(d.firstSeen)}</Td>

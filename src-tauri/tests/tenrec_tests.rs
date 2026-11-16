@@ -72,6 +72,7 @@ fn connection(pid: u32, name: &str, remote: &str, public: bool) -> ConnectionInf
         local_port: 50000,
         remote_address: remote.to_string(),
         remote_port: 443,
+        hostname: None,
         state: "ESTABLISHED".to_string(),
         is_public_remote: public,
         is_new: false,

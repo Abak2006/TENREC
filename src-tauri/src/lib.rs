@@ -91,6 +91,9 @@ pub fn run() {
             set_startup_enabled,
             get_scheduled_tasks,
             set_task_enabled,
+            get_privacy_settings,
+            set_privacy_setting,
+            get_privacy_evidence,
         ])
         .run(tauri::generate_context!())
         .expect("error while running TENREC");

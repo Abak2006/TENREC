@@ -1,4 +1,5 @@
 // TENREC - Windows controls (startup, tasks, privacy, power, cleanup)
+pub mod privacy;
 pub mod startup;
 pub mod tasks;
 

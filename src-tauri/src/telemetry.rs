@@ -6,7 +6,8 @@
 // on a full process scan.
 use crate::baseline::BaselineEngine;
 use crate::correlation::CorrelationEngine;
-use crate::network::{collect_sockets, connection_counts, ConnectionInfo, DestinationTracker, ListeningPortInfo, NetworkThroughput, ProcessNames, ThroughputTracker, TopDestination};
+use crate::controls::privacy::EvidenceTracker;
+use crate::network::{collect_sockets, DnsCache, connection_counts, ConnectionInfo, DestinationTracker, ListeningPortInfo, NetworkThroughput, ProcessNames, ThroughputTracker, TopDestination};
 use crate::persistence::Database;
 use crate::processes::{ApplicationItem, ProcessItem, ProcessManager};
 use crate::security::SecurityEngine;
@@ -38,6 +39,7 @@ pub struct Collectors {
     system: SystemManager,
     throughput: ThroughputTracker,
     destinations: DestinationTracker,
+    dns: DnsCache,
 }
 
 impl Default for Collectors {
@@ -53,6 +55,7 @@ impl Collectors {
             system: SystemManager::new(),
             throughput: ThroughputTracker::new(),
             destinations: DestinationTracker::new(),
+            dns: DnsCache::new(),
         }
     }
 }
@@ -62,6 +65,7 @@ pub struct TelemetryHub {
     pub correlation: CorrelationEngine,
     pub baseline: BaselineEngine,
     pub security: SecurityEngine,
+    pub privacy: EvidenceTracker,
     running: AtomicBool,
 }
 
@@ -78,6 +82,7 @@ impl TelemetryHub {
             correlation: CorrelationEngine::new(),
             baseline: BaselineEngine::new(),
             security: SecurityEngine::new(),
+            privacy: EvidenceTracker::new(),
             running: AtomicBool::new(false),
         }
     }
@@ -91,6 +96,11 @@ impl TelemetryHub {
         let mut processes = c.processes.sample();
         let names: ProcessNames = processes.iter().map(|p| (p.pid, (p.name.clone(), p.application_name.clone()))).collect();
         let (mut connections, listening) = collect_sockets(&names);
+        c.dns.refresh_if_due();
+        for conn in connections.iter_mut().filter(|c| c.is_public_remote) {
+            conn.hostname = c.dns.lookup(&conn.remote_address);
+        }
+        self.privacy.observe(&connections, c.dns.len());
         let counts = connection_counts(&connections);
         for p in processes.iter_mut() {
             p.connection_count = counts.get(&p.pid).copied().unwrap_or(0);

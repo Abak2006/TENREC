@@ -14,6 +14,8 @@ pub struct ConnectionInfo {
     pub local_port: u16,
     pub remote_address: String,
     pub remote_port: u16,
+    /// Name from the local DNS cache, when Windows resolved this address recently.
+    pub hostname: Option<String>,
     pub state: String,
     pub is_public_remote: bool,
     /// True when this remote address was first seen in the current sample.
@@ -38,6 +40,7 @@ pub struct ListeningPortInfo {
 #[serde(rename_all = "camelCase")]
 pub struct TopDestination {
     pub destination: String,
+    pub hostname: Option<String>,
     /// Applications that currently or previously connected to this address.
     pub applications: Vec<String>,
     /// Connections open to this address right now.

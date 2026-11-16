@@ -78,3 +78,64 @@ fn scheduled_task_toggle_is_recorded_and_undone() {
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+use tenrec_lib::controls::privacy;
+use tenrec_lib::network::DnsCache;
+
+#[test]
+fn privacy_setting_change_is_exactly_undone() {
+    // Low-impact HKCU setting; its exact previous value (or absence) is restored.
+    const KEY: &str = r"Software\Microsoft\Siuf\Rules";
+    let before = registry::read(Hive::CurrentUser, KEY, "NumberOfSIUFInPeriod").unwrap();
+    let setting = privacy::list().into_iter().find(|s| s.id == "feedback_requests").unwrap();
+    let (pm, db, dir) = manager();
+    let snap = pm.record_setting(privacy::set_private("feedback_requests", !setting.is_private).unwrap());
+    let flipped = privacy::list().into_iter().find(|s| s.id == "feedback_requests").unwrap();
+    assert_eq!(flipped.is_private, !setting.is_private);
+    assert_eq!(pm.restore_snapshot(&snap).unwrap().failed, 0);
+    assert_eq!(registry::read(Hive::CurrentUser, KEY, "NumberOfSIUFInPeriod").unwrap(), before);
+    assert!(privacy::set_private("not_a_setting", true).is_err());
+    drop(db);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn every_privacy_setting_is_readable() {
+    let list = privacy::list();
+    assert!(list.len() >= 10);
+    assert!(list.iter().any(|s| s.requires_admin) && list.iter().any(|s| !s.requires_admin));
+}
+
+#[test]
+fn telemetry_host_matching() {
+    assert!(privacy::is_telemetry_host("v10.events.data.microsoft.com"));
+    assert!(privacy::is_telemetry_host("watson.microsoft.com"));
+    assert!(!privacy::is_telemetry_host("www.microsoft.com"));
+    assert!(!privacy::is_telemetry_host("example.com"));
+}
+
+#[test]
+fn dns_cache_maps_resolved_addresses_back_to_names() {
+    use std::net::ToSocketAddrs;
+    // The OS resolves the name (this test's own lookup), so it lands in the DNS cache.
+    let Ok(addrs) = ("example.com", 80).to_socket_addrs() else {
+        eprintln!("offline: skipping DNS cache test");
+        return;
+    };
+    let ip = addrs.map(|a| a.ip().to_string()).next().unwrap();
+    let mut cache = DnsCache::new();
+    cache.refresh_if_due();
+    if cache.is_empty() {
+        // Some VPN / secure-DNS clients bypass the Windows DNS client cache entirely.
+        // Only fail when Windows itself reports cached entries that TENREC missed.
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "(Get-DnsClientCache | Measure-Object).Count"])
+            .output()
+            .unwrap();
+        let os_count: usize = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
+        assert_eq!(os_count, 0, "Windows reports {os_count} cached entries but TENREC read none");
+        eprintln!("Windows DNS cache is empty on this machine: skipping");
+        return;
+    }
+    assert_eq!(cache.lookup(&ip).as_deref(), Some("example.com"));
+}

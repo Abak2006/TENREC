@@ -193,6 +193,7 @@ pub fn collect_sockets(process_names: &ProcessNames) -> (Vec<ConnectionInfo>, Ve
                 local_port: r.local_port,
                 remote_address: r.remote.to_string(),
                 remote_port: r.remote_port,
+                hostname: None,
                 state: tcp_state(r.state).to_string(),
                 is_public_remote: is_public_ip(&r.remote),
                 is_new: false,

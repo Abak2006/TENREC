@@ -99,7 +99,7 @@ pub fn list() -> Result<Vec<ScheduledTaskItem>, String> {
             }
         })
         .collect();
-    items.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    items.sort_by_key(|a| a.name.to_ascii_lowercase());
     Ok(items)
 }
 
