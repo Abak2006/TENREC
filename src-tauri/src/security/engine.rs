@@ -1,327 +1,360 @@
-// TENREC - Security Detection & Structured Evidence Engine
-use crate::baseline::engine::BaselineEngine;
+// TENREC - Heuristic detection and action registry
+//
+// Detectors only produce incidents and *proposed* actions. Nothing here changes
+// system state; applying an action goes through ProtectionManager after the user
+// approves it.
 use crate::network::types::{ConnectionInfo, ListeningPortInfo};
-use crate::processes::types::ProcessItem;
-use crate::security::types::{ActionRisk, EvidenceItem, IncidentSeverity, ProposedAction, SecurityIncident};
+use crate::processes::types::{ApplicationItem, ProcessItem};
+use crate::protection::guard;
+use crate::protection::process_ctrl::creation_time;
+use crate::security::types::*;
+use crate::util::LockExt;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+const MAX_INCIDENTS: usize = 300;
+const MAX_ACTIONS: usize = 1000;
+
+/// Script hosts and LOLBins that rarely need to talk to the internet directly.
+const SCRIPT_HOSTS: &[&str] = &[
+    "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe",
+    "rundll32.exe", "regsvr32.exe", "certutil.exe", "bitsadmin.exe", "msbuild.exe", "installutil.exe",
+];
+
+/// Ports commonly used by default by remote-access tools and backdoors.
+const BACKDOOR_PORTS: &[u16] = &[1337, 4444, 5554, 6666, 6667, 12345, 27374, 31337, 54321];
+
+#[derive(Default)]
+struct Inner {
+    incidents: HashMap<String, SecurityIncident>,
+    actions: HashMap<String, ProposedAction>,
+}
+
+#[derive(Default)]
 pub struct SecurityEngine {
-    incidents: Mutex<Vec<SecurityIncident>>,
-    proposed_actions: Mutex<HashMap<String, ProposedAction>>,
+    inner: Mutex<Inner>,
+}
+
+struct Finding {
+    key: String,
+    detector: &'static str,
+    title: String,
+    severity: IncidentSeverity,
+    app: String,
+    pid: Option<u32>,
+    summary: String,
+    why: &'static str,
+    evidence: Vec<EvidenceItem>,
+    actions: Vec<ProposedAction>,
+}
+
+fn ev(label: &str, value: impl Into<String>) -> EvidenceItem {
+    EvidenceItem { label: label.to_string(), value: value.into() }
+}
+
+fn block_ip_action(ip: &str, process: &str) -> ProposedAction {
+    ProposedAction {
+        id: String::new(),
+        incident_id: None,
+        title: format!("Block outbound traffic to {ip}"),
+        description: format!("Adds a Windows Firewall rule that blocks all outbound connections from this PC to {ip}."),
+        risk: ActionRisk::Safe,
+        expected_benefit: format!("{process} and every other program lose access to {ip}."),
+        potential_consequence: "Anything legitimate hosted at that address (for example a CDN shared by many sites) also becomes unreachable.".to_string(),
+        requires_admin: true,
+        default_selected: true,
+        target: ActionTarget::BlockRemoteIp { ip: ip.to_string() },
+    }
+}
+
+fn suspend_action(pid: u32, name: &str) -> Option<ProposedAction> {
+    if guard::check_process(pid, name).is_err() {
+        return None;
+    }
+    let ct = creation_time(pid)?;
+    Some(ProposedAction {
+        id: String::new(),
+        incident_id: None,
+        title: format!("Suspend {name} (PID {pid})"),
+        description: "Pauses every thread of the process until you resume it from the Protection page.".to_string(),
+        risk: ActionRisk::Risky,
+        expected_benefit: "The process can do nothing further (no network, no file writes) while you investigate.".to_string(),
+        potential_consequence: "Work in that program freezes. If it is part of something larger (an installer, a build), that may fail or time out.".to_string(),
+        requires_admin: false,
+        default_selected: false,
+        target: ActionTarget::SuspendProcess { pid, process_name: name.to_string(), creation_time: ct },
+    })
+}
+
+fn block_port_action(port: u16, protocol: &str, process: &str) -> ProposedAction {
+    ProposedAction {
+        id: String::new(),
+        incident_id: None,
+        title: format!("Block inbound {protocol} port {port}"),
+        description: format!("Adds a Windows Firewall rule that blocks inbound {protocol} connections to local port {port}."),
+        risk: ActionRisk::Safe,
+        expected_benefit: format!("Other machines can no longer reach {process} on port {port}."),
+        potential_consequence: "If the service is something you use from another device (e.g. a dev server or game host), that stops working.".to_string(),
+        requires_admin: true,
+        default_selected: true,
+        target: ActionTarget::BlockInboundPort { port, protocol: protocol.to_string() },
+    }
 }
 
 impl SecurityEngine {
     pub fn new() -> Self {
-        Self {
-            incidents: Mutex::new(Vec::new()),
-            proposed_actions: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 
-    pub fn analyze(
+    fn detect(
         &self,
         processes: &[ProcessItem],
         connections: &[ConnectionInfo],
-        listening_ports: &[ListeningPortInfo],
-        baseline: &BaselineEngine,
-    ) {
+        listening: &[ListeningPortInfo],
+    ) -> Vec<Finding> {
+        let by_pid: HashMap<u32, &ProcessItem> = processes.iter().map(|p| (p.pid, p)).collect();
+        let mut findings = Vec::new();
+
+        for c in connections.iter().filter(|c| c.is_public_remote) {
+            let proc_name = c.process_name.to_ascii_lowercase();
+            let path = by_pid.get(&c.pid).map(|p| p.executable_path.as_str()).unwrap_or("");
+
+            if SCRIPT_HOSTS.contains(&proc_name.as_str()) {
+                let mut actions = vec![block_ip_action(&c.remote_address, &c.process_name)];
+                actions.extend(suspend_action(c.pid, &c.process_name));
+                findings.push(Finding {
+                    key: format!("script_net:{}:{}", c.pid, c.remote_address),
+                    detector: "script_host_public_connection",
+                    title: format!("{} connected to a public address", c.process_name),
+                    severity: IncidentSeverity::High,
+                    app: c.application_name.clone(),
+                    pid: Some(c.pid),
+                    summary: format!("{} (PID {}) is connected to {}:{} ({}).", c.process_name, c.pid, c.remote_address, c.remote_port, c.state),
+                    why: "Script hosts and built-in admin tools are often used by malware to download payloads or contact a command server. Package managers, update scripts and your own scripts trigger this too, so check what launched it.",
+                    evidence: vec![
+                        ev("Process", format!("{} (PID {})", c.process_name, c.pid)),
+                        ev("Path", if path.is_empty() { "Unavailable" } else { path }),
+                        ev("Remote", format!("{}:{}", c.remote_address, c.remote_port)),
+                        ev("State", c.state.clone()),
+                    ],
+                    actions,
+                });
+            } else if by_pid.get(&c.pid).map(|p| p.runs_from_user_writable_location).unwrap_or(false) {
+                let mut actions = vec![block_ip_action(&c.remote_address, &c.process_name)];
+                actions.extend(suspend_action(c.pid, &c.process_name));
+                findings.push(Finding {
+                    key: format!("writable_net:{}:{}", c.pid, c.remote_address),
+                    detector: "user_writable_binary_public_connection",
+                    title: format!("{} (running from a download/temp folder) is online", c.process_name),
+                    severity: IncidentSeverity::Medium,
+                    app: c.application_name.clone(),
+                    pid: Some(c.pid),
+                    summary: format!("{} runs from {} and is connected to {}:{}.", c.process_name, path, c.remote_address, c.remote_port),
+                    why: "Programs started from Downloads or Temp folders have not been installed. Installers and portable apps do this legitimately; malware dropped by a browser or email attachment does too.",
+                    evidence: vec![
+                        ev("Process", format!("{} (PID {})", c.process_name, c.pid)),
+                        ev("Path", path),
+                        ev("Remote", format!("{}:{}", c.remote_address, c.remote_port)),
+                    ],
+                    actions,
+                });
+            }
+        }
+
+        for l in listening.iter().filter(|l| l.all_interfaces && l.protocol == "TCP") {
+            let path = by_pid.get(&l.pid).map(|p| p.executable_path.as_str()).unwrap_or("");
+            let writable = by_pid.get(&l.pid).map(|p| p.runs_from_user_writable_location).unwrap_or(false);
+            let backdoor = BACKDOOR_PORTS.contains(&l.port);
+            if !backdoor && !writable {
+                continue;
+            }
+            let mut actions = vec![block_port_action(l.port, &l.protocol, &l.process_name)];
+            actions.extend(suspend_action(l.pid, &l.process_name));
+            findings.push(Finding {
+                key: format!("listen:{}:{}", l.pid, l.port),
+                detector: if backdoor { "backdoor_port_listener" } else { "user_writable_binary_listener" },
+                title: if backdoor {
+                    format!("{} is listening on port {} (common backdoor port)", l.process_name, l.port)
+                } else {
+                    format!("{} (running from a download/temp folder) accepts network connections", l.process_name)
+                },
+                severity: if backdoor { IncidentSeverity::High } else { IncidentSeverity::Medium },
+                app: l.application_name.clone(),
+                pid: Some(l.pid),
+                summary: format!("{} (PID {}) listens on TCP {} on all interfaces ({}).", l.process_name, l.pid, l.port, l.bind_address),
+                why: if backdoor {
+                    "This port is the default for several remote-access tools and backdoors. Some legitimate tools use it too (pen-testing frameworks, dev servers), so confirm you started it."
+                } else {
+                    "A program that was not installed is accepting connections from other machines. Portable apps and game servers do this legitimately."
+                },
+                evidence: vec![
+                    ev("Process", format!("{} (PID {})", l.process_name, l.pid)),
+                    ev("Path", if path.is_empty() { "Unavailable" } else { path }),
+                    ev("Listening on", format!("{}:{}", l.bind_address, l.port)),
+                ],
+                actions,
+            });
+        }
+        findings
+    }
+
+    pub fn analyze(&self, processes: &[ProcessItem], connections: &[ConnectionInfo], listening: &[ListeningPortInfo]) {
+        let findings = self.detect(processes, connections, listening);
         let now = Utc::now().to_rfc3339();
-        let mut actions_to_register = Vec::new();
+        let mut g = self.inner.lock_safe();
 
-        // 1. Detector: Scripting / Execution Engines making external sockets
-        let suspicious_binaries = [
-            "powershell.exe",
-            "cmd.exe",
-            "wscript.exe",
-            "cscript.exe",
-            "mshta.exe",
-            "rundll32.exe",
-            "regsvr32.exe",
-            "certutil.exe",
-        ];
-
-        for conn in connections.iter() {
-            let proc_lower = conn.process_name.to_lowercase();
-            let is_external = !conn.remote_address.starts_with("127.")
-                && !conn.remote_address.starts_with("192.168.")
-                && !conn.remote_address.starts_with("10.")
-                && !conn.remote_address.starts_with("172.16.")
-                && conn.remote_address != "0.0.0.0"
-                && !conn.remote_address.is_empty();
-
-            if is_external && suspicious_binaries.iter().any(|&b| proc_lower == b) {
-                let incident_id = format!("inc_script_net_{}_{}", conn.pid, conn.remote_port);
-
-                // Check if already reported
-                let mut incidents_lock = self.incidents.lock().unwrap();
-                if !incidents_lock.iter().any(|i| i.id == incident_id) {
-                    let action_safe_id = format!("act_fw_block_{}_{}", conn.pid, conn.remote_port);
-                    let action_risky_id = format!("act_suspend_{}", conn.pid);
-
-                    let safe_action = ProposedAction {
-                        id: action_safe_id.clone(),
-                        incident_id: Some(incident_id.clone()),
-                        title: format!("Block Outbound Endpoint {} via Firewall", conn.remote_address),
-                        description: format!(
-                            "Add scoped Windows Firewall rule blocking outbound traffic to {}:{} for process {}.",
-                            conn.remote_address, conn.remote_port, conn.process_name
-                        ),
-                        risk: ActionRisk::Safe,
-                        rationale: format!(
-                            "Restricts '{}' (PID {}) from communicating with {} while allowing legitimate local execution.",
-                            conn.process_name, conn.pid, conn.remote_address
-                        ),
-                        expected_benefit: "Prevents remote script payloads and command exfiltration immediately without terminating the script interpreter.".to_string(),
-                        potential_consequence: "Outbound HTTP/HTTPS requests from this script instance will be blocked.".to_string(),
-                        current_state: "Unrestricted outbound connection established".to_string(),
-                        proposed_state: format!("Outbound traffic to {}:{} dropped by TENREC_RULE", conn.remote_address, conn.remote_port),
-                        is_reversible: true,
-                        default_selected: true,
-                        selected: true,
-                        duration_minutes: 0,
-                        target_type: "firewall_rule".to_string(),
-                        target_identifier: conn.remote_address.clone(),
-                    };
-
-                    let risky_action = ProposedAction {
-                        id: action_risky_id.clone(),
-                        incident_id: Some(incident_id.clone()),
-                        title: format!("Suspend Process {} (PID {})", conn.process_name, conn.pid),
-                        description: format!(
-                            "Freeze execution of '{}' (PID {}) to prevent any further operations.",
-                            conn.process_name, conn.pid
-                        ),
-                        risk: ActionRisk::Risky,
-                        rationale: "Complete halt of binary execution until forensic review is completed.".to_string(),
-                        expected_benefit: "Halts all potential malicious file writes, child process spawns, and memory tampering.".to_string(),
-                        potential_consequence: "Any running automated script will hang until resumed or terminated.".to_string(),
-                        current_state: "Running active execution threads".to_string(),
-                        proposed_state: "All process threads suspended via NtSuspendProcess".to_string(),
-                        is_reversible: true,
-                        default_selected: false,
-                        selected: false,
-                        duration_minutes: 0,
-                        target_type: "process_suspend".to_string(),
-                        target_identifier: conn.pid.to_string(),
-                    };
-
-                    let incident = SecurityIncident {
-                        id: incident_id.clone(),
-                        title: format!("Unusual Network Connection from Script Interpreter: {}", conn.process_name),
-                        severity: IncidentSeverity::High,
-                        confidence_percent: 88,
-                        first_observed: now.clone(),
-                        last_observed: now.clone(),
-                        affected_application: conn.application_name.clone(),
-                        affected_pid: Some(conn.pid),
-                        destinations: vec![format!("{}:{}", conn.remote_address, conn.remote_port)],
-                        summary: format!(
-                            "Process '{}' (PID {}) initiated an outbound {} socket to external IP {}:{}.",
-                            conn.process_name, conn.pid, conn.protocol, conn.remote_address, conn.remote_port
-                        ),
-                        why_detected: "Script interpreters rarely communicate with arbitrary external IP addresses unless executing unverified downloaders or command-and-control scripts.".to_string(),
-                        baseline_comparison: "Baseline shows 0 historical outbound sockets for this script process tree.".to_string(),
-                        evidence: vec![
-                            EvidenceItem {
-                                key: "process_binary".to_string(),
-                                label: "Process Name".to_string(),
-                                observed_value: conn.process_name.clone(),
-                                baseline_value: "N/A".to_string(),
-                                explanation: "Executing binary is a native Windows scripting host.".to_string(),
-                            },
-                            EvidenceItem {
-                                key: "remote_endpoint".to_string(),
-                                label: "Remote Socket".to_string(),
-                                observed_value: format!("{}:{}", conn.remote_address, conn.remote_port),
-                                baseline_value: "Local/None".to_string(),
-                                explanation: "Outbound socket connects directly to a non-private public IP address.".to_string(),
-                            },
-                            EvidenceItem {
-                                key: "socket_state".to_string(),
-                                label: "Connection State".to_string(),
-                                observed_value: conn.state.clone(),
-                                baseline_value: "CLOSED".to_string(),
-                                explanation: "Active connection in ESTABLISHED or SYN_SENT state.".to_string(),
-                            },
-                        ],
-                        proposed_action_ids: vec![action_safe_id, action_risky_id],
-                        status: "ACTIVE".to_string(),
-                    };
-
-                    incidents_lock.push(incident);
-                    actions_to_register.push(safe_action);
-                    actions_to_register.push(risky_action);
-                }
-            }
+        for inc in g.incidents.values_mut() {
+            inc.currently_observed = false;
         }
 
-        // 2. Detector: High Traffic Outlier vs Baseline
-        for proc in processes.iter() {
-            if proc.net_upload_bps > 5_000_000 { // > 5 MB/s upload
-                let incident_id = format!("inc_upload_spike_{}", proc.pid);
-                let mut incidents_lock = self.incidents.lock().unwrap();
-                if !incidents_lock.iter().any(|i| i.id == incident_id) {
-                    let action_safe_id = format!("act_prio_drop_{}", proc.pid);
-                    let safe_action = ProposedAction {
-                        id: action_safe_id.clone(),
-                        incident_id: Some(incident_id.clone()),
-                        title: format!("Lower Process Priority for {}", proc.name),
-                        description: format!("Set process priority of '{}' (PID {}) to IDLE to prevent network & CPU saturation.", proc.name, proc.pid),
-                        risk: ActionRisk::Safe,
-                        rationale: "Reduces resource contention while user monitors the outbound data flow.".to_string(),
-                        expected_benefit: "Preserves desktop responsiveness without terminating the workload.".to_string(),
-                        potential_consequence: "Process will run slower in the background.".to_string(),
-                        current_state: "Normal / Above Normal priority".to_string(),
-                        proposed_state: "Idle Priority Class".to_string(),
-                        is_reversible: true,
-                        default_selected: true,
-                        selected: true,
-                        duration_minutes: 0,
-                        target_type: "process_priority".to_string(),
-                        target_identifier: proc.pid.to_string(),
-                    };
-
-                    let incident = SecurityIncident {
-                        id: incident_id.clone(),
-                        title: format!("High Upload Bandwidth Divergence: {}", proc.name),
-                        severity: IncidentSeverity::Medium,
-                        confidence_percent: 75,
-                        first_observed: now.clone(),
-                        last_observed: now.clone(),
-                        affected_application: proc.application_name.clone(),
-                        affected_pid: Some(proc.pid),
-                        destinations: vec![],
-                        summary: format!(
-                            "Process '{}' is uploading at {:.2} MB/s, significantly exceeding baseline activity.",
-                            proc.name, (proc.net_upload_bps as f64) / (1024.0 * 1024.0)
-                        ),
-                        why_detected: "Outbound transfer rate exceeds 5 MB/s and deviates from moving historical average.".to_string(),
-                        baseline_comparison: format!("Baseline average: {:.2} KB/s", baseline.get_baseline(&proc.application_name).map(|b| b.avg_net_bps / 1024.0).unwrap_or(0.0)),
-                        evidence: vec![
-                            EvidenceItem {
-                                key: "upload_rate".to_string(),
-                                label: "Upload Rate".to_string(),
-                                observed_value: format!("{:.2} MB/s", (proc.net_upload_bps as f64) / (1024.0 * 1024.0)),
-                                baseline_value: "< 100 KB/s".to_string(),
-                                explanation: "Sustained high data throughput detected.".to_string(),
-                            }
-                        ],
-                        proposed_action_ids: vec![action_safe_id],
-                        status: "ACTIVE".to_string(),
-                    };
-
-                    incidents_lock.push(incident);
-                    actions_to_register.push(safe_action);
-                }
+        for f in findings {
+            let id = format!("inc_{:x}", stable_hash(&f.key));
+            if let Some(existing) = g.incidents.get_mut(&id) {
+                existing.last_observed = now.clone();
+                existing.observation_count += 1;
+                existing.currently_observed = true;
+                continue;
             }
+            let mut action_ids = Vec::new();
+            for (i, mut a) in f.actions.into_iter().enumerate() {
+                a.id = format!("{id}_a{i}");
+                a.incident_id = Some(id.clone());
+                action_ids.push(a.id.clone());
+                g.actions.insert(a.id.clone(), a);
+            }
+            g.incidents.insert(
+                id.clone(),
+                SecurityIncident {
+                    id,
+                    detector: f.detector.to_string(),
+                    title: f.title,
+                    severity: f.severity,
+                    first_observed: now.clone(),
+                    last_observed: now.clone(),
+                    observation_count: 1,
+                    currently_observed: true,
+                    affected_application: f.app,
+                    affected_pid: f.pid,
+                    summary: f.summary,
+                    why_detected: f.why.to_string(),
+                    evidence: f.evidence,
+                    proposed_action_ids: action_ids,
+                    status: IncidentStatus::Active,
+                },
+            );
         }
 
-        // 3. Detector: High-Risk / Backdoor Listening Ports on 0.0.0.0
-        let risky_ports = [4444, 1337, 31337, 5555, 6667, 8888];
-        for port_info in listening_ports.iter() {
-            if (risky_ports.contains(&port_info.port) || (!port_info.is_known_service && port_info.port > 10000))
-                && port_info.bind_address == "0.0.0.0"
-            {
-                let incident_id = format!("inc_listen_port_{}_{}", port_info.pid, port_info.port);
-                let mut incidents_lock = self.incidents.lock().unwrap();
-                if !incidents_lock.iter().any(|i| i.id == incident_id) {
-                    let action_safe_id = format!("act_fw_port_block_{}", port_info.port);
-                    let safe_action = ProposedAction {
-                        id: action_safe_id.clone(),
-                        incident_id: Some(incident_id.clone()),
-                        title: format!("Block Inbound Port :{} via Firewall", port_info.port),
-                        description: format!(
-                            "Add scoped Windows Firewall rule blocking inbound connections on port {} for process {}.",
-                            port_info.port, port_info.process_name
-                        ),
-                        risk: ActionRisk::Safe,
-                        rationale: format!(
-                            "Prevents remote access to listening port {} without shutting down the application.",
-                            port_info.port
-                        ),
-                        expected_benefit: "Neutralizes incoming connections while process stays active.".to_string(),
-                        potential_consequence: "External systems will receive connection refused on this port.".to_string(),
-                        current_state: format!("Port {} listening on all network interfaces (0.0.0.0)", port_info.port),
-                        proposed_state: format!("Inbound port {} traffic dropped by TENREC_RULE", port_info.port),
-                        is_reversible: true,
-                        default_selected: true,
-                        selected: true,
-                        duration_minutes: 0,
-                        target_type: "firewall_rule".to_string(),
-                        target_identifier: port_info.port.to_string(),
-                    };
-
-                    let incident = SecurityIncident {
-                        id: incident_id.clone(),
-                        title: format!("Unusual Open Listening Port :{} ({})", port_info.port, port_info.process_name),
-                        severity: if risky_ports.contains(&port_info.port) { IncidentSeverity::High } else { IncidentSeverity::Medium },
-                        confidence_percent: 82,
-                        first_observed: now.clone(),
-                        last_observed: now.clone(),
-                        affected_application: port_info.application_name.clone(),
-                        affected_pid: Some(port_info.pid),
-                        destinations: vec![format!("{}:{}", port_info.bind_address, port_info.port)],
-                        summary: format!(
-                            "Process '{}' opened a listening socket on port :{} binding to all interfaces.",
-                            port_info.process_name, port_info.port
-                        ),
-                        why_detected: "Process is listening on an unverified port bound to 0.0.0.0, exposing a local service to the network.".to_string(),
-                        baseline_comparison: "No historical baseline for this listening port.".to_string(),
-                        evidence: vec![
-                            EvidenceItem {
-                                key: "listening_port".to_string(),
-                                label: "Listening Port".to_string(),
-                                observed_value: format!(":{}", port_info.port),
-                                baseline_value: "Closed".to_string(),
-                                explanation: "Socket is actively accepting connections.".to_string(),
-                            },
-                            EvidenceItem {
-                                key: "bind_address".to_string(),
-                                label: "Bind Address".to_string(),
-                                observed_value: port_info.bind_address.clone(),
-                                baseline_value: "127.0.0.1".to_string(),
-                                explanation: "Bound globally to 0.0.0.0 (all network adapters) rather than localhost.".to_string(),
-                            }
-                        ],
-                        proposed_action_ids: vec![action_safe_id],
-                        status: "ACTIVE".to_string(),
-                    };
-
-                    incidents_lock.push(incident);
-                    actions_to_register.push(safe_action);
-                }
+        if g.incidents.len() > MAX_INCIDENTS {
+            let mut old: Vec<(String, String)> = g
+                .incidents
+                .values()
+                .filter(|i| !i.currently_observed)
+                .map(|i| (i.last_observed.clone(), i.id.clone()))
+                .collect();
+            old.sort();
+            let excess = g.incidents.len() - MAX_INCIDENTS;
+            for (_, id) in old.into_iter().take(excess) {
+                g.incidents.remove(&id);
+                g.actions.retain(|_, a| a.incident_id.as_deref() != Some(id.as_str()));
             }
-        }
-
-        // 4. Register proposed actions
-        let mut actions_lock = self.proposed_actions.lock().unwrap();
-        for act in actions_to_register {
-            actions_lock.insert(act.id.clone(), act);
         }
     }
 
     pub fn get_incidents(&self) -> Vec<SecurityIncident> {
-        let lock = self.incidents.lock().unwrap();
-        lock.clone()
+        let g = self.inner.lock_safe();
+        let mut list: Vec<_> = g.incidents.values().cloned().collect();
+        list.sort_by(|a, b| b.last_observed.cmp(&a.last_observed));
+        list
+    }
+
+    pub fn set_incident_status(&self, id: &str, status: IncidentStatus) -> bool {
+        let mut g = self.inner.lock_safe();
+        match g.incidents.get_mut(id) {
+            Some(i) => {
+                i.status = status;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn get_proposed_actions(&self, incident_id: Option<&str>) -> Vec<ProposedAction> {
-        let lock = self.proposed_actions.lock().unwrap();
-        match incident_id {
-            Some(id) => lock.values().filter(|a| a.incident_id.as_deref() == Some(id)).cloned().collect(),
-            None => lock.values().cloned().collect(),
-        }
+        let g = self.inner.lock_safe();
+        let mut list: Vec<_> = g
+            .actions
+            .values()
+            .filter(|a| incident_id.is_none() || a.incident_id.as_deref() == incident_id)
+            .cloned()
+            .collect();
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        list
     }
 
-    pub fn set_incident_status(&self, id: &str, status: &str) -> bool {
-        let mut lock = self.incidents.lock().unwrap();
-        if let Some(inc) = lock.iter_mut().find(|i| i.id == id) {
-            inc.status = status.to_string();
-            true
-        } else {
-            false
-        }
+    pub fn get_action(&self, id: &str) -> Option<ProposedAction> {
+        self.inner.lock_safe().actions.get(id).cloned()
     }
+
+    fn register(&self, mut a: ProposedAction) -> ProposedAction {
+        let mut g = self.inner.lock_safe();
+        a.id = format!("usr_{}", uuid::Uuid::new_v4().simple());
+        if g.actions.len() >= MAX_ACTIONS {
+            g.actions.retain(|_, x| x.incident_id.is_some());
+        }
+        g.actions.insert(a.id.clone(), a.clone());
+        a
+    }
+
+    /// Builds a user-requested process action from the latest observed process list.
+    pub fn prepare_process_action(&self, processes: &[ProcessItem], pid: u32, kind: &str) -> Result<ProposedAction, String> {
+        let p = processes
+            .iter()
+            .find(|p| p.pid == pid)
+            .ok_or_else(|| format!("Process {pid} is no longer running."))?;
+        guard::check_process(p.pid, &p.name)?;
+        let ct = creation_time(pid).ok_or_else(|| format!("Windows denied access to {} (PID {}). It may be protected or belong to another user; run TENREC as administrator to control it.", p.name, pid))?;
+        let action = match kind {
+            "priority" => ProposedAction {
+                id: String::new(),
+                incident_id: None,
+                title: format!("Lower priority of {} (PID {})", p.name, pid),
+                description: "Sets the process priority class to Idle, so it only runs when nothing else needs the CPU. The previous priority is recorded and restored on undo.".to_string(),
+                risk: ActionRisk::Safe,
+                expected_benefit: "Keeps the rest of the system responsive while this process keeps running.".to_string(),
+                potential_consequence: "The process runs slower whenever the CPU is busy.".to_string(),
+                requires_admin: false,
+                default_selected: true,
+                target: ActionTarget::LowerPriority { pid, process_name: p.name.clone(), creation_time: ct },
+            },
+            "suspend" => suspend_action(pid, &p.name).ok_or_else(|| format!("{} cannot be suspended.", p.name))?,
+            other => return Err(format!("Unknown process action '{other}'.")),
+        };
+        Ok(self.register(action))
+    }
+
+    /// Builds a user-requested outbound block for an application's executable.
+    pub fn prepare_program_block(&self, app: &ApplicationItem) -> Result<ProposedAction, String> {
+        guard::check_program_path(&app.executable_path)?;
+        Ok(self.register(ProposedAction {
+            id: String::new(),
+            incident_id: None,
+            title: format!("Block internet access for {}", app.name),
+            description: format!("Adds a Windows Firewall rule that blocks all outbound connections made by {}.", app.executable_path),
+            risk: ActionRisk::Risky,
+            expected_benefit: format!("{} can no longer send or receive data over the network.", app.name),
+            potential_consequence: "Sign-in, sync, updates and any online feature of the app stop working until you undo the block.".to_string(),
+            requires_admin: true,
+            default_selected: false,
+            target: ActionTarget::BlockProgram { path: app.executable_path.clone() },
+        }))
+    }
+}
+
+fn stable_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

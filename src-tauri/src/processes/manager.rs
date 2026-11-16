@@ -1,178 +1,186 @@
-// TENREC - Native Windows Process & Application Manager
+// TENREC - Process & Application Inventory
 use crate::processes::types::{ApplicationItem, ProcessItem};
-use chrono::Utc;
+use crate::processes::version_info::{read_version_info, VersionInfo};
+use crate::util::is_user_writable_location;
+use chrono::{TimeZone, Utc};
 use std::collections::HashMap;
 use std::path::Path;
-use sysinfo::System;
+use std::time::Instant;
+use sysinfo::{ProcessesToUpdate, System};
 
 pub struct ProcessManager {
-    sys: sysinfo::System,
-    #[allow(dead_code)]
-    publisher_cache: HashMap<String, String>,
+    sys: System,
+    version_cache: HashMap<String, VersionInfo>,
+    app_first_seen: HashMap<String, String>,
+    last_refresh: Option<Instant>,
+    logical_cores: usize,
+}
+
+impl Default for ProcessManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProcessManager {
     pub fn new() -> Self {
         let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        let logical_cores = sys.cpus().len().max(1);
         Self {
             sys,
-            publisher_cache: HashMap::new(),
+            version_cache: HashMap::new(),
+            app_first_seen: HashMap::new(),
+            last_refresh: Some(Instant::now()),
+            logical_cores,
         }
     }
 
-    // Deduce application display name and clean publisher
-    fn deduce_application_identity(exe_name: &str, path_str: &str) -> (String, String) {
-        let lower = exe_name.to_lowercase();
-        let stem = Path::new(exe_name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(exe_name);
-
-        let (app_name, publisher) = match lower.as_str() {
-            "chrome.exe" => ("Google Chrome", "Google LLC"),
-            "msedge.exe" => ("Microsoft Edge", "Microsoft Corporation"),
-            "brave.exe" => ("Brave Browser", "Brave Software, Inc."),
-            "firefox.exe" => ("Mozilla Firefox", "Mozilla Corporation"),
-            "code.exe" => ("Visual Studio Code", "Microsoft Corporation"),
-            "discord.exe" => ("Discord", "Discord Inc."),
-            "spotify.exe" => ("Spotify", "Spotify AB"),
-            "steam.exe" | "steamservice.exe" => ("Steam", "Valve Corporation"),
-            "explorer.exe" => ("Windows Explorer", "Microsoft Corporation"),
-            "taskmgr.exe" => ("Task Manager", "Microsoft Corporation"),
-            "cmd.exe" => ("Windows Command Processor", "Microsoft Corporation"),
-            "powershell.exe" | "pwsh.exe" => ("Windows PowerShell", "Microsoft Corporation"),
-            "svchost.exe" => ("Host Process for Windows Services", "Microsoft Corporation"),
-            "services.exe" => ("Services and Controller app", "Microsoft Corporation"),
-            "lsass.exe" => ("Local Security Authority Process", "Microsoft Corporation"),
-            "csrss.exe" => ("Client Server Runtime Process", "Microsoft Corporation"),
-            "smss.exe" => ("Session Manager Subsystem", "Microsoft Corporation"),
-            "wininit.exe" => ("Windows Start-Up Application", "Microsoft Corporation"),
-            "winlogon.exe" => ("Windows Logon Application", "Microsoft Corporation"),
-            "spoolsv.exe" => ("Print Spooler Subsystem", "Microsoft Corporation"),
-            "devenv.exe" => ("Visual Studio 2022", "Microsoft Corporation"),
-            "git.exe" => ("Git SCM", "Software Freedom Conservancy"),
-            "node.exe" => ("Node.js JavaScript Runtime", "OpenJS Foundation"),
-            "cargo.exe" | "rustc.exe" => ("Rust Toolchain", "Rust Project Developers"),
-            "tenrec.exe" => ("TENREC Core", "TENREC Systems"),
-            _ => {
-                let name = if stem.len() > 1 {
-                    let mut chars = stem.chars();
-                    match chars.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
-                    }
-                } else {
-                    stem.to_string()
-                };
-
-                let pub_name = if path_str.contains("Windows\\System32") || path_str.contains("Windows\\SysWOW64") {
-                    "Microsoft Windows OS"
-                } else if path_str.contains("Program Files") {
-                    "Installed Software Vendor"
-                } else {
-                    "Unknown / Unsigned"
-                };
-
-                return (name, pub_name.to_string());
-            }
-        };
-
-        (app_name.to_string(), publisher.to_string())
+    fn version_for(&mut self, path: &str) -> VersionInfo {
+        if path.is_empty() {
+            return VersionInfo::default();
+        }
+        let key = path.to_ascii_lowercase();
+        if let Some(v) = self.version_cache.get(&key) {
+            return v.clone();
+        }
+        let v = read_version_info(path);
+        if self.version_cache.len() > 4096 {
+            self.version_cache.clear();
+        }
+        self.version_cache.insert(key, v.clone());
+        v
     }
 
-    pub fn refresh(&mut self) {
-        self.sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    fn app_identity(name: &str, path: &str, info: &VersionInfo) -> (String, String) {
+        let id_source = if path.is_empty() { name.to_ascii_lowercase() } else { path.to_ascii_lowercase() };
+        let id = format!("app_{:x}", fxhash(&id_source));
+        let stem = Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name).to_string();
+        let display = info
+            .description
+            .clone()
+            .or_else(|| info.product.clone())
+            .unwrap_or(stem);
+        (id, display)
     }
 
-    pub fn get_processes(&mut self, socket_counts: &HashMap<u32, usize>) -> Vec<ProcessItem> {
-        self.refresh();
+    /// Refresh the process table once and build the process list.
+    /// `connection_count` is left at 0; the telemetry sampler fills it in.
+    pub fn sample(&mut self) -> Vec<ProcessItem> {
+        self.sys.refresh_memory();
+        self.sys.refresh_processes(ProcessesToUpdate::All, true);
+        let now = Instant::now();
+        let elapsed = self
+            .last_refresh
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(0.0)
+            .max(0.001);
+        self.last_refresh = Some(now);
 
-        let mut items = Vec::new();
         let total_mem = self.sys.total_memory() as f64;
+        let cores = self.logical_cores as f64;
 
-        for (pid, proc) in self.sys.processes() {
-            let pid_u32 = pid.as_u32();
-            let name = proc.name().to_string_lossy().to_string();
-            let path_str = proc
-                .exe()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| name.clone());
+        let raw: Vec<_> = self
+            .sys
+            .processes()
+            .iter()
+            .map(|(pid, p)| {
+                let disk = p.disk_usage();
+                (
+                    pid.as_u32(),
+                    p.parent().map(|pp| pp.as_u32()),
+                    p.name().to_string_lossy().to_string(),
+                    p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default(),
+                    p.cpu_usage() as f64,
+                    p.memory(),
+                    disk.read_bytes,
+                    disk.written_bytes,
+                    p.start_time(),
+                )
+            })
+            .collect();
 
-            let (app_name, publisher) = Self::deduce_application_identity(&name, &path_str);
-            let mem_bytes = proc.memory();
-            let mem_percent = if total_mem > 0.0 {
-                (mem_bytes as f64 / total_mem) * 100.0
+        let mut items = Vec::with_capacity(raw.len());
+        for (pid, ppid, name, path, cpu, mem, read, written, start) in raw {
+            let info = self.version_for(&path);
+            let (app_id, app_name) = Self::app_identity(&name, &path, &info);
+            let start_time = if start > 0 {
+                Utc.timestamp_opt(start as i64, 0).single().map(|t| t.to_rfc3339()).unwrap_or_default()
             } else {
-                0.0
+                String::new()
             };
-
-            let conn_count = *socket_counts.get(&pid_u32).unwrap_or(&0);
-
             items.push(ProcessItem {
-                pid: pid_u32,
-                ppid: proc.parent().map(|p| p.as_u32()),
+                pid,
+                ppid,
+                runs_from_user_writable_location: is_user_writable_location(&path),
+                // sysinfo reads the image path and CPU times with the same access right,
+                // so a missing path means CPU/I-O were not readable either.
+                restricted: path.is_empty() && pid > 4,
                 name,
-                executable_path: path_str,
-                publisher,
-                cpu_percent: (proc.cpu_usage() as f64).clamp(0.0, 100.0),
-                memory_bytes: mem_bytes,
-                memory_percent: mem_percent.clamp(0.0, 100.0),
-                net_upload_bps: 0,
-                net_download_bps: 0,
-                connection_count: conn_count,
-                start_time: proc.start_time().to_string(),
-                is_elevated: false, // Default user mode unless elevated query succeeds
+                executable_path: path,
+                company: info.company.clone(),
+                application_id: app_id,
                 application_name: app_name,
+                cpu_percent: (cpu / cores).clamp(0.0, 100.0),
+                memory_bytes: mem,
+                memory_percent: if total_mem > 0.0 { (mem as f64 / total_mem * 100.0).clamp(0.0, 100.0) } else { 0.0 },
+                io_read_bps: (read as f64 / elapsed) as u64,
+                io_write_bps: (written as f64 / elapsed) as u64,
+                connection_count: 0, // filled in by the sampler once sockets are collected
+                start_time,
             });
         }
-
+        items.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
         items
     }
 
-    pub fn get_applications(
-        &mut self,
-        processes: &[ProcessItem],
-    ) -> Vec<ApplicationItem> {
-        let mut app_groups: HashMap<String, Vec<&ProcessItem>> = HashMap::new();
-
+    pub fn group_applications(&mut self, processes: &[ProcessItem]) -> Vec<ApplicationItem> {
+        let mut groups: HashMap<&str, Vec<&ProcessItem>> = HashMap::new();
         for p in processes {
-            app_groups.entry(p.application_name.clone()).or_default().push(p);
+            // PID 0/4 (Idle/System) carry no useful application identity.
+            if p.pid == 0 {
+                continue;
+            }
+            groups.entry(p.application_id.as_str()).or_default().push(p);
         }
 
-        let mut apps = Vec::new();
         let now = Utc::now().to_rfc3339();
-
-        for (app_name, procs) in app_groups {
-            let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
-            let total_cpu: f64 = procs.iter().map(|p| p.cpu_percent).sum();
-            let total_mem: u64 = procs.iter().map(|p| p.memory_bytes).sum();
-            let total_conns: usize = procs.iter().map(|p| p.connection_count).sum();
-
-            let first_proc = procs.first().unwrap();
-            let publisher = first_proc.publisher.clone();
-            let exe_path = first_proc.executable_path.clone();
-
-            apps.push(ApplicationItem {
-                id: format!("app_{}", app_name.replace(' ', "_").to_lowercase()),
-                name: app_name,
-                publisher,
-                executable_path: exe_path,
-                process_count: procs.len(),
-                pids,
-                cpu_percent: total_cpu,
-                memory_bytes: total_mem,
-                net_upload_bps: 0,
-                net_download_bps: 0,
-                connection_count: total_conns,
-                first_seen: now.clone(),
-                last_seen: now.clone(),
-                baseline_status: "normal".to_string(),
-                security_status: "healthy".to_string(),
-            });
-        }
-
-        apps.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
+        let mut apps: Vec<ApplicationItem> = groups
+            .into_iter()
+            .map(|(id, procs)| {
+                let first = procs[0];
+                let first_seen = self.app_first_seen.entry(id.to_string()).or_insert_with(|| now.clone()).clone();
+                ApplicationItem {
+                    id: id.to_string(),
+                    name: first.application_name.clone(),
+                    company: first.company.clone(),
+                    executable_path: first.executable_path.clone(),
+                    process_count: procs.len(),
+                    pids: procs.iter().map(|p| p.pid).collect(),
+                    cpu_percent: procs.iter().map(|p| p.cpu_percent).sum::<f64>().min(100.0),
+                    memory_bytes: procs.iter().map(|p| p.memory_bytes).sum(),
+                    io_read_bps: procs.iter().map(|p| p.io_read_bps).sum(),
+                    io_write_bps: procs.iter().map(|p| p.io_write_bps).sum(),
+                    connection_count: procs.iter().map(|p| p.connection_count).sum(),
+                    restricted_process_count: procs.iter().filter(|p| p.restricted).count(),
+                    first_seen,
+                    baseline_status: "learning".to_string(),
+                }
+            })
+            .collect();
+        apps.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent).then(b.memory_bytes.cmp(&a.memory_bytes)));
         apps
     }
+}
+
+/// Small stable (non-cryptographic) hash for application ids.
+fn fxhash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

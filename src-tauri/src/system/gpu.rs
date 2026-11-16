@@ -27,34 +27,26 @@ pub fn collect_gpu_metrics() -> GpuMetrics {
             memory_used_bytes: None,
             utilization_percent: None,
             temperature_c: None,
-            status_message: "Display Adapter active. Advanced per-frame telemetry requires vendor hardware extension.".to_string(),
+            status_message: "Adapter name only. TENREC does not collect GPU utilisation or temperature yet.".to_string(),
         }
     } else {
         GpuMetrics {
-            name: "Generic Display Adapter".to_string(),
+            name: "Unknown display adapter".to_string(),
             is_available: false,
             memory_total_bytes: None,
             memory_used_bytes: None,
             utilization_percent: None,
             temperature_c: None,
-            status_message: "GPU temperature / metrics unavailable on this system.".to_string(),
+            status_message: "Display adapter could not be identified from the registry.".to_string(),
         }
     }
 }
 
 fn query_primary_display_adapter() -> Option<String> {
-    // Check registry for active display adapter description
-    use std::process::Command;
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController | Select-Object -First 1).Name"])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !name.is_empty() {
-            return Some(name);
-        }
+    let (name, _) = crate::hardware::win_reg::get_cached_gpu_details();
+    if !name.is_empty() && name != "Unknown display adapter" {
+        Some(name)
+    } else {
+        None
     }
-    None
 }

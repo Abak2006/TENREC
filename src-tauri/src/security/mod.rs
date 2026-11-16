@@ -3,4 +3,4 @@ pub mod engine;
 pub mod types;
 
 pub use engine::SecurityEngine;
-pub use types::{ActionRisk, EvidenceItem, IncidentSeverity, ProposedAction, SecurityIncident};
+pub use types::{ActionRisk, ActionTarget, EvidenceItem, IncidentSeverity, IncidentStatus, ProposedAction, SecurityIncident};

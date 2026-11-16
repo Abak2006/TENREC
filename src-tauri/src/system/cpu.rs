@@ -22,6 +22,12 @@ pub struct CpuCollector {
     has_prev: bool,
 }
 
+impl Default for CpuCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuCollector {
     pub fn new() -> Self {
         Self {

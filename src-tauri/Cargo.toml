@@ -1,7 +1,7 @@
 [package]
 name = "tenrec"
-version = "0.1.0"
-description = "TENREC - Local-first Windows System Intelligence & Control"
+version = "0.2.0"
+description = "Local-first Windows system monitor with reversible firewall and process controls"
 authors = ["TENREC Team"]
 license = "Proprietary"
 edition = "2021"
@@ -10,6 +10,10 @@ rust-version = "1.77.2"
 [lib]
 name = "tenrec_lib"
 crate-type = ["staticlib", "rlib"]
+# Tests live in tests/: they link the app manifest resource (see build.rs).
+# The lib's own unit-test harness would not, and fails to start on Windows.
+test = false
+doctest = false
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
@@ -35,5 +39,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
     "Win32_Security",
-    "Win32_System_LibraryLoader"
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry"
 ] }
