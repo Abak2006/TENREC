@@ -53,6 +53,7 @@ function Power() {
   return (
     <Section title="Power" description="Windows power mode and power plans. Focus mode can also switch the power mode only while it runs.">
       {error && <Banner tone="danger" title="Could not read power settings">{error}</Banner>}
+      {!state && !error && <p className="text-muted-foreground">Reading power settings…</p>}
       {state && (
         <div className="flex flex-col gap-5">
           <div>

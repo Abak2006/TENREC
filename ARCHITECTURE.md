@@ -37,3 +37,17 @@ undo              → per change: firewall delete / restore previous priority / 
 `ActionTarget` is an enum built only by the backend: `BlockRemoteIp`, `BlockProgram`, `BlockInboundPort`, `LowerPriority` and `SuspendProcess`. The webview never supplies an IP, path, port or PID that gets executed. It can only reference an action ID the backend created.
 
 Process actions carry the process creation time. Before applying or undoing, TENREC checks that the PID still belongs to that same process instance, because Windows reuses PIDs.
+
+## Controls (v0.3)
+
+- `platform/` holds thin, reversible wrappers around Windows:
+  - `registry` captures the previous raw value
+  - `tuning` covers process scheduling hints
+  - `power` and `qos` cover power mode/plans and upload limits
+- `controls/` holds the user-facing features built on top:
+  - `startup` and `tasks`
+  - `privacy` (settings catalogue plus DNS-cache evidence)
+  - `cleanup`
+- `focus.rs` runs in the sampler's post-sample hook. It applies treatment to new processes every tick and appends the changes to one Focus snapshot.
+
+Every change except file cleanup becomes an `AppliedChange` inside a `RestorationSnapshot`, so it can be undone. Each snapshot has a kind: actions, focus or settings.

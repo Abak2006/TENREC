@@ -164,7 +164,7 @@ function Setup() {
   };
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       <Section title="1. Choose the app to focus on" bodyClassName="p-0">
         <div className="border-b p-3">
           <SearchInput value={query} onChange={setQuery} placeholder="Find an app" label="Find an app to focus on" />

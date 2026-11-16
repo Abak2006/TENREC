@@ -22,8 +22,21 @@ TENREC can change firewall rules and control processes, so the boundary between 
 3. **Protected processes are refused.** Suspending or deprioritising core Windows and security processes (`csrss`, `lsass`, `svchost`, `dwm`, `explorer`, Defender, TENREC itself…) is refused. So is blocking `svchost`, `lsass`, `services`, or Defender by program.
 4. **Private addresses are never blocked.** IP blocks only accept public addresses, so a mistake cannot cut off your router, DNS server or LAN.
 5. **Stale PIDs are left alone.** Process actions verify the process creation time before applying and before undoing.
-6. **Everything is recorded and reversible.** Every applied change is stored with its undo data in SQLite and survives restarts. Every attempt, successful or not, is written to the audit log.
-7. **Least privilege.** TENREC runs as a standard user by default. Firewall changes fail with a clear message unless the user starts it as administrator. There is no background service.
+6. **Windows settings are restored exactly.**
+   - Registry writes (privacy, startup approval, GPU preference) store the previous raw value, or the fact that there was none, and restore it byte for byte.
+   - Only fixed, known keys are written.
+   - Scheduled tasks are changed with `schtasks` argument passing, and only for tasks TENREC listed itself, never under `\Microsoft\`.
+   - QoS upload limits go into the ActiveStore, so even a crash cannot leave one in place after a reboot. Their only inputs are a validated executable name and a numeric rate.
+7. **Focus mode is bounded.**
+   - Only processes TENREC can open are touched. Protected and excluded processes are skipped.
+   - Every process change records the creation time, so a reused PID is never restored to the wrong process.
+   - Sessions still active at the last exit are undone at the next launch.
+8. **Cleanup is the only irreversible action.**
+   - It always shows sizes and asks before deleting.
+   - It stays inside each category's own folder and never follows symlinks or junctions.
+   - It skips files that are in use, and audits every run.
+9. **Everything is recorded and reversible.** Every applied change is stored with its undo data in SQLite and survives restarts. Every attempt, successful or not, is written to the audit log.
+10. **Least privilege.** TENREC runs as a standard user by default. Firewall changes fail with a clear message unless the user starts it as administrator. There is no background service.
 
 ## Known limitations
 
