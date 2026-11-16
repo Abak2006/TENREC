@@ -1,5 +1,6 @@
 // TENREC - Native desktop application core
 pub mod baseline;
+pub mod controls;
 pub mod correlation;
 pub mod focus;
 pub mod hardware;
@@ -86,6 +87,10 @@ pub fn run() {
             preview_focus,
             start_focus,
             stop_focus,
+            get_startup_items,
+            set_startup_enabled,
+            get_scheduled_tasks,
+            set_task_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running TENREC");

@@ -14,6 +14,8 @@ pub enum AppliedChange {
     ProcessTuning { pid: u32, process_name: String, creation_time: u64, previous: TuningState },
     /// A registry value TENREC wrote; `previous: None` means it did not exist before.
     Registry { hive: Hive, key: String, name: String, previous: Option<RegValue> },
+    /// A third-party scheduled task TENREC enabled or disabled.
+    ScheduledTask { path: String, was_enabled: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

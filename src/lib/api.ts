@@ -1,6 +1,6 @@
 // Typed wrappers around the Tauri IPC commands in src-tauri/src/ipc/commands.rs.
 import type {
-  ActivePolicy, AppStatus, ApplicationItem, ApplyResult, AuditEntry, ConnectionInfo, DatabaseStats, FocusOptions, FocusPreview, FocusStatus,
+  ActivePolicy, AppStatus, ApplicationItem, ApplyResult, AuditEntry, ConnectionInfo, DatabaseStats, FocusOptions, FocusPreview, FocusStatus, ScheduledTaskItem, SettingChangeResult, StartupItem,
   HardwareCapabilityItem, HardwareDiagnostics, ListeningPortInfo, NetworkThroughput, ProcessItem,
   ProposedAction, RestorationSnapshot, RestoreResult, SecurityIncident, SystemSnapshot, TopDestination,
   WhatChangedItem,
@@ -55,5 +55,10 @@ export const api = {
   previewFocus: (appId: string, options: FocusOptions) => call<FocusPreview>('preview_focus', { appId, options }),
   startFocus: (appId: string, options: FocusOptions) => call<FocusStatus>('start_focus', { appId, options }),
   stopFocus: () => call<RestoreResult>('stop_focus'),
+  startupItems: () => call<StartupItem[]>('get_startup_items'),
+  setStartupEnabled: (itemId: string, enabled: boolean) => call<SettingChangeResult>('set_startup_enabled', { itemId, enabled }),
+  scheduledTasks: () => call<ScheduledTaskItem[]>('get_scheduled_tasks'),
+  setTaskEnabled: (path: string, enabled: boolean) => call<SettingChangeResult>('set_task_enabled', { path, enabled }),
+  undoSnapshot: (snapshotId: string) => call<RestoreResult>('restore_snapshot', { snapshotId }),
   purgeTelemetry: (retentionHours: number) => call<number>('purge_old_telemetry', { retentionHours }),
 };

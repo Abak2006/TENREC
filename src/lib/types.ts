@@ -319,3 +319,32 @@ export interface FocusStatus {
   };
   hybridCpu: boolean;
 }
+
+export interface StartupItem {
+  id: string;
+  name: string;
+  command: string;
+  executablePath: string | null;
+  company: string | null;
+  source: string;
+  sourceLabel: string;
+  enabled: boolean;
+  requiresAdmin: boolean;
+  runningNow: boolean;
+}
+
+export interface ScheduledTaskItem {
+  path: string;
+  name: string;
+  author: string | null;
+  state: string;
+  enabled: boolean;
+  triggers: string[];
+  actions: string[];
+  runsAtLogonOrBoot: boolean;
+}
+
+export interface SettingChangeResult {
+  snapshotId: string;
+  description: string;
+}

@@ -236,3 +236,36 @@ pub fn purge_old_telemetry(state: State<'_, AppState>, retention_hours: u32) -> 
     }
     state.db.purge_old_telemetry(retention_hours).map_err(|e| e.to_string())
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingChangeResult {
+    pub snapshot_id: String,
+    pub description: String,
+}
+
+#[tauri::command(async)]
+pub fn get_startup_items(state: State<'_, AppState>) -> Vec<crate::controls::startup::StartupItem> {
+    let sample = state.hub.latest();
+    let running = sample.processes.iter().map(|p| p.executable_path.to_ascii_lowercase()).filter(|p| !p.is_empty()).collect();
+    crate::controls::startup::list(&running)
+}
+
+#[tauri::command(async)]
+pub fn set_startup_enabled(state: State<'_, AppState>, item_id: String, enabled: bool) -> Result<SettingChangeResult, String> {
+    let change = crate::controls::startup::set_enabled(&item_id, enabled)?;
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command(async)]
+pub fn get_scheduled_tasks() -> Result<Vec<crate::controls::tasks::ScheduledTaskItem>, String> {
+    crate::controls::tasks::list()
+}
+
+#[tauri::command(async)]
+pub fn set_task_enabled(state: State<'_, AppState>, path: String, enabled: bool) -> Result<SettingChangeResult, String> {
+    let change = crate::controls::tasks::set_enabled(&path, enabled)?;
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}

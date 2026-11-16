@@ -81,6 +81,7 @@ fn undo(change: &AppliedChange) -> Result<Option<String>, String> {
             tuning::restore(*pid, previous).map(|_| None)
         }
         AppliedChange::Registry { hive, key, name, previous } => registry::restore(*hive, key, name, previous).map(|_| None),
+        AppliedChange::ScheduledTask { path, was_enabled } => crate::controls::tasks::restore(path, *was_enabled).map(|_| None),
     }
 }
 
@@ -91,6 +92,7 @@ fn change_kind(c: &AppliedChange) -> &'static str {
         AppliedChange::Suspended { .. } => "suspended",
         AppliedChange::ProcessTuning { .. } => "tuning",
         AppliedChange::Registry { .. } => "setting",
+        AppliedChange::ScheduledTask { .. } => "scheduled_task",
     }
 }
 
@@ -110,6 +112,13 @@ impl ProtectionManager {
         if let Err(e) = self.db.save_snapshot(snap) {
             log::error!("Could not persist snapshot {}: {e}", snap.id);
         }
+    }
+
+    /// Records one Windows settings change as its own undoable snapshot.
+    pub fn record_setting(&self, change: ChangeRecord) -> String {
+        let _ = self.audit("change_setting", &change.description, "applied", true);
+        let title = change.description.clone();
+        self.record(SnapshotKind::Settings, title, vec![change])
     }
 
     pub fn audit(&self, action_type: &str, target: &str, details: &str, success: bool) -> rusqlite::Result<()> {
