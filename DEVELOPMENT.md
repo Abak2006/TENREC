@@ -26,4 +26,6 @@ cd src-tauri && cargo test && cargo clippy --all-targets
 npm run tauri build         # MSI + NSIS installers
 ```
 
+Build release binaries with `npm run tauri build` (add `-- --no-bundle` to skip the installers), not plain `cargo build --release`. The Tauri CLI enables the feature that embeds the UI; without it the binary tries to load the dev server at `localhost:5173` and shows "can't reach this page".
+
 To test firewall actions, start a terminal as administrator and run `npm run tauri dev` from it.

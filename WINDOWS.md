@@ -18,5 +18,16 @@
 | Suspend / resume | `NtSuspendProcess`, `NtResumeProcess` (ntdll) | Undocumented but long-stable |
 | Firewall | `netsh advfirewall firewall add/delete rule` | Rules named `TENREC_RULE_*` only |
 | Firewall cleanup | PowerShell `Get-NetFirewallRule -DisplayName 'TENREC_RULE_*' \| Remove-NetFirewallRule` | Fixed script; admin only |
+| Focus: efficiency mode, memory priority | `SetProcessInformation` (`ProcessPowerThrottling`, `ProcessMemoryPriority`) | Previous values read with `GetProcessInformation` |
+| Focus: disk priority | `NtQueryInformationProcess` / `NtSetInformationProcess` (class 33) | Undocumented but long-stable |
+| Focus: efficiency cores | `GetSystemCpuSetInformation`, `SetProcessDefaultCpuSets` | Only on CPUs with more than one efficiency class |
+| GPU preference | `HKCU\Software\Microsoft\DirectX\UserGpuPreferences` | Same value as Settings > Graphics |
+| Upload limits | `New-NetQosPolicy -PolicyStore ActiveStore` | Admin; cleared on reboot |
+| Power mode | `PowerGetEffectiveOverlayScheme`, `PowerSetActiveOverlayScheme` (powrprof) | Overlay setter is undocumented |
+| Power plans | `powercfg /list`, `/getactivescheme`, `/setactive` | Output parsed by GUID, so it works in any language |
+| Startup apps | `...\CurrentVersion\Run`, Startup folders, `...\Explorer\StartupApproved\*` | Same values as Task Manager |
+| Scheduled tasks | `Get-ScheduledTask` (listing), `schtasks /Change /ENABLE\|/DISABLE` | |
+| Hostnames | `DnsGetCacheDataTable` (undocumented), `DnsQuery_W` with `DNS_QUERY_NO_WIRE_QUERY` | Local cache only, no network queries |
+| Recycle Bin | `SHQueryRecycleBinW`, `SHEmptyRecycleBinW` | |
 
 Without administrator rights, `OpenProcess` is denied for most service and system processes. TENREC then cannot read their path, CPU or I/O, and marks them as restricted ("n/a") instead of showing 0.

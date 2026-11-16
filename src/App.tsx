@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Activity, AppWindow, Cpu, Gauge, Network, Settings, ShieldAlert, Undo2 } from 'lucide-react';
+import { Activity, AppWindow, Cpu, Crosshair, EyeOff, Rocket, Wrench, Gauge, Network, Settings, ShieldAlert, Undo2 } from 'lucide-react';
 import { ActionReviewProvider } from '@/components/action-review';
 import { Banner } from '@/components/common';
 import { ToastProvider } from '@/components/toast';
@@ -8,6 +8,10 @@ import { useAppData } from '@/lib/store';
 import { NavigateContext, type PageId } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
 import { OverviewPage } from '@/pages/overview';
+import { FocusPage } from '@/pages/focus';
+import { StartupPage } from '@/pages/startup';
+import { PrivacyPage } from '@/pages/privacy';
+import { MaintenancePage } from '@/pages/maintenance';
 import { ProcessesPage } from '@/pages/processes';
 import { ApplicationsPage } from '@/pages/applications';
 import { NetworkPage } from '@/pages/network';
@@ -19,6 +23,10 @@ import { SettingsPage } from '@/pages/settings';
 
 const NAV: { id: PageId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'overview', label: 'Overview', icon: Gauge },
+  { id: 'focus', label: 'Focus', icon: Crosshair },
+  { id: 'startup', label: 'Startup', icon: Rocket },
+  { id: 'privacy', label: 'Privacy', icon: EyeOff },
+  { id: 'maintenance', label: 'Maintenance', icon: Wrench },
   { id: 'processes', label: 'Processes', icon: Activity },
   { id: 'applications', label: 'Applications', icon: AppWindow },
   { id: 'network', label: 'Network', icon: Network },
@@ -33,6 +41,7 @@ function Sidebar({ page, onSelect }: { page: PageId; onSelect: (p: PageId) => vo
   const policies = useAppData((s) => s.policies);
   const status = useAppData((s) => s.status);
   const activeIncidents = incidents.filter((i) => i.status === 'ACTIVE').length;
+  const focusActive = useAppData((s) => s.focus?.active ?? false);
 
   return (
     <nav aria-label="Main" className="flex w-52 shrink-0 flex-col border-r bg-sidebar">
@@ -57,6 +66,7 @@ function Sidebar({ page, onSelect }: { page: PageId; onSelect: (p: PageId) => vo
               >
                 <Icon className="size-4" />
                 <span className="flex-1">{label}</span>
+                {id === 'focus' && focusActive && <span className="size-2 rounded-full bg-primary" aria-label="Focus is on" />}
                 {count > 0 && (
                   <span
                     className={cn(
@@ -118,6 +128,10 @@ function Content({ page }: { page: PageId }) {
         </div>
       )}
       {page === 'overview' && <OverviewPage />}
+      {page === 'focus' && <FocusPage />}
+      {page === 'startup' && <StartupPage />}
+      {page === 'privacy' && <PrivacyPage />}
+      {page === 'maintenance' && <MaintenancePage />}
       {page === 'processes' && <ProcessesPage />}
       {page === 'applications' && <ApplicationsPage />}
       {page === 'network' && <NetworkPage />}

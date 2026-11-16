@@ -3,12 +3,14 @@
 // Read commands return the latest background sample. Commands that change the system
 // accept only action IDs created by the backend, never raw targets from the webview.
 use crate::correlation::WhatChangedItem;
+use crate::focus::{FocusOptions, FocusPreview, FocusStatus};
 use crate::hardware::{HardwareCapabilityItem, HardwareDiagnostics, HardwareRegistry};
 use crate::ipc::state::AppState;
 use crate::network::{ConnectionInfo, ListeningPortInfo, NetworkThroughput, TopDestination};
 use crate::persistence::{AuditEntry, DatabaseStats};
 use crate::processes::{ApplicationItem, ProcessItem};
 use crate::protection::process_ctrl::is_elevated;
+use crate::protection::types::{AppliedChange, ChangeRecord, ChangeStatus};
 use crate::protection::{ActionOutcome, ActivePolicy, ApplyResult, RestorationSnapshot, RestoreResult};
 use crate::security::{IncidentStatus, ProposedAction, SecurityIncident};
 use crate::system::SystemSnapshot;
@@ -160,7 +162,46 @@ pub fn restore_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Resu
 
 #[tauri::command(async)]
 pub fn restore_all(state: State<'_, AppState>) -> RestoreResult {
+    // Undo everything includes a running focus session; stop tracking it first so it
+    // does not keep adding changes to a restored snapshot.
+    state.focus.forget();
     state.protection.restore_all()
+}
+
+#[tauri::command]
+pub fn get_focus_status(state: State<'_, AppState>) -> FocusStatus {
+    state.focus.status()
+}
+
+fn find_app(sample: &crate::telemetry::Sample, app_id: &str) -> Result<ApplicationItem, String> {
+    sample
+        .applications
+        .iter()
+        .find(|a| a.id == app_id)
+        .cloned()
+        .ok_or_else(|| "That application is no longer running.".to_string())
+}
+
+#[tauri::command(async)]
+pub fn preview_focus(state: State<'_, AppState>, app_id: String, options: FocusOptions) -> Result<FocusPreview, String> {
+    let sample = state.hub.latest();
+    let app = find_app(&sample, &app_id)?;
+    Ok(state.focus.preview(&sample, &app, &options))
+}
+
+#[tauri::command(async)]
+pub fn start_focus(state: State<'_, AppState>, app_id: String, options: FocusOptions) -> Result<FocusStatus, String> {
+    if options.exclusions.len() > 500 {
+        return Err("Too many exclusions.".to_string());
+    }
+    let sample = state.hub.latest();
+    let app = find_app(&sample, &app_id)?;
+    state.focus.start(&sample, &app, options, &state.protection)
+}
+
+#[tauri::command(async)]
+pub fn stop_focus(state: State<'_, AppState>) -> Result<RestoreResult, String> {
+    state.focus.stop(&state.protection)
 }
 
 static DIAGNOSTICS: OnceLock<HardwareDiagnostics> = OnceLock::new();
@@ -195,4 +236,117 @@ pub fn purge_old_telemetry(state: State<'_, AppState>, retention_hours: u32) -> 
         return Err("Retention must be between 1 hour and 1 year.".to_string());
     }
     state.db.purge_old_telemetry(retention_hours).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingChangeResult {
+    pub snapshot_id: String,
+    pub description: String,
+}
+
+#[tauri::command(async)]
+pub fn get_startup_items(state: State<'_, AppState>) -> Vec<crate::controls::startup::StartupItem> {
+    let sample = state.hub.latest();
+    let running = sample.processes.iter().map(|p| p.executable_path.to_ascii_lowercase()).filter(|p| !p.is_empty()).collect();
+    crate::controls::startup::list(&running)
+}
+
+#[tauri::command(async)]
+pub fn set_startup_enabled(state: State<'_, AppState>, item_id: String, enabled: bool) -> Result<SettingChangeResult, String> {
+    let change = crate::controls::startup::set_enabled(&item_id, enabled)?;
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command(async)]
+pub fn get_scheduled_tasks() -> Result<Vec<crate::controls::tasks::ScheduledTaskItem>, String> {
+    crate::controls::tasks::list()
+}
+
+#[tauri::command(async)]
+pub fn set_task_enabled(state: State<'_, AppState>, path: String, enabled: bool) -> Result<SettingChangeResult, String> {
+    let change = crate::controls::tasks::set_enabled(&path, enabled)?;
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command(async)]
+pub fn get_privacy_settings() -> Vec<crate::controls::privacy::PrivacySetting> {
+    crate::controls::privacy::list()
+}
+
+#[tauri::command(async)]
+pub fn set_privacy_setting(state: State<'_, AppState>, id: String, private: bool) -> Result<SettingChangeResult, String> {
+    let change = crate::controls::privacy::set_private(&id, private)?;
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command]
+pub fn get_privacy_evidence(state: State<'_, AppState>) -> crate::controls::privacy::PrivacyEvidence {
+    state.hub.privacy.snapshot()
+}
+
+#[tauri::command(async)]
+pub fn get_power_state() -> Result<crate::platform::power::PowerState, String> {
+    crate::platform::power::state()
+}
+
+#[tauri::command(async)]
+pub fn set_power_plan(state: State<'_, AppState>, guid: String) -> Result<SettingChangeResult, String> {
+    use crate::platform::power;
+    let current = power::state()?;
+    let plan = current.plans.iter().find(|p| p.guid.eq_ignore_ascii_case(&guid)).ok_or("That power plan does not exist.")?;
+    let previous = power::active_plan()?;
+    if previous.eq_ignore_ascii_case(&plan.guid) {
+        return Err("That plan is already active.".to_string());
+    }
+    power::set_plan(&plan.guid)?;
+    let change = ChangeRecord {
+        change: AppliedChange::PowerPlan { previous },
+        description: format!("Power plan set to {}", plan.name),
+        status: ChangeStatus::Active,
+        note: None,
+    };
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command(async)]
+pub fn set_power_mode(state: State<'_, AppState>, mode: String) -> Result<SettingChangeResult, String> {
+    use crate::platform::power;
+    let target = power::mode_from_name(&mode).ok_or("Unknown power mode.")?;
+    let previous = power::mode_guid().ok_or("This Windows version does not expose the power mode setting.")?;
+    if previous == target {
+        return Err("That power mode is already active.".to_string());
+    }
+    power::set_mode_guid(target)?;
+    let change = ChangeRecord {
+        change: AppliedChange::PowerMode { previous },
+        description: format!("Power mode set to {}", mode.replace('_', " ")),
+        status: ChangeStatus::Active,
+        note: None,
+    };
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command(async)]
+pub fn scan_cleanup() -> Vec<crate::controls::cleanup::CategoryScan> {
+    crate::controls::cleanup::scan()
+}
+
+#[tauri::command(async)]
+pub fn run_cleanup(state: State<'_, AppState>, category: crate::controls::cleanup::Category) -> crate::controls::cleanup::CleanResult {
+    let r = crate::controls::cleanup::clean(category);
+    let details = format!(
+        "{} files, {} bytes freed, {} skipped{}",
+        r.deleted_files,
+        r.freed_bytes,
+        r.skipped_files,
+        r.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
+    );
+    let _ = state.protection.audit("cleanup", &format!("{category:?}"), &details, r.error.is_none());
+    r
 }

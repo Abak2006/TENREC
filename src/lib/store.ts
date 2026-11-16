@@ -6,7 +6,7 @@
 import { useSyncExternalStore } from 'react';
 import { api, NotInTauriError } from './api';
 import type {
-  ActivePolicy, AppStatus, ApplicationItem, AuditEntry, ConnectionInfo, HardwareCapabilityItem,
+  ActivePolicy, AppStatus, FocusStatus, ApplicationItem, AuditEntry, ConnectionInfo, HardwareCapabilityItem,
   HardwareDiagnostics, ListeningPortInfo, NetworkThroughput, ProcessItem, RestorationSnapshot,
   SecurityIncident, SystemSnapshot, TopDestination, WhatChangedItem,
 } from './types';
@@ -27,6 +27,7 @@ export interface AppData {
   error: string | null;
   lastUpdated: number | null;
   status: AppStatus | null;
+  focus: FocusStatus | null;
   snapshot: SystemSnapshot | null;
   throughput: NetworkThroughput | null;
   processes: ProcessItem[];
@@ -49,6 +50,7 @@ const initial: AppData = {
   error: null,
   lastUpdated: null,
   status: null,
+  focus: null,
   snapshot: null,
   throughput: null,
   processes: [],
@@ -120,10 +122,10 @@ class Store {
         this.set({ status });
         return;
       }
-      const [snapshot, throughput, processes, applications, connections, listening, destinations, incidents, changes] =
+      const [snapshot, throughput, processes, applications, connections, listening, destinations, incidents, changes, focus] =
         await Promise.all([
           api.systemSnapshot(), api.throughput(), api.processes(), api.applications(), api.connections(),
-          api.listeningPorts(), api.destinations(), api.incidents(), api.whatChanged(),
+          api.listeningPorts(), api.destinations(), api.incidents(), api.whatChanged(), api.focusStatus(),
         ]);
       this.lastSequence = status.sampleSequence;
       this.failures = 0;
@@ -141,7 +143,7 @@ class Store {
         loading: snapshot === null,
         error: null,
         lastUpdated: Date.now(),
-        status, snapshot, throughput, processes, applications, connections, listening, destinations, incidents, changes,
+        status, snapshot, throughput, processes, applications, connections, listening, destinations, incidents, changes, focus,
         history,
       });
     } catch (err) {

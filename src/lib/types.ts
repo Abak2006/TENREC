@@ -81,6 +81,7 @@ export interface ConnectionInfo {
   localPort: number;
   remoteAddress: string;
   remotePort: number;
+  hostname: string | null;
   state: string;
   isPublicRemote: boolean;
   isNew: boolean;
@@ -99,6 +100,7 @@ export interface ListeningPortInfo {
 
 export interface TopDestination {
   destination: string;
+  hostname: string | null;
   applications: string[];
   openConnections: number;
   timesSeen: number;
@@ -193,7 +195,7 @@ export interface WhatChangedItem {
 }
 
 export interface ChangeRecord {
-  change: { kind: 'firewall_rule' | 'priority' | 'suspended' };
+  change: { kind: ChangeKind };
   description: string;
   status: 'ACTIVE' | 'RESTORED' | 'RESTORE_FAILED';
   note: string | null;
@@ -205,12 +207,15 @@ export interface RestorationSnapshot {
   title: string;
   changes: ChangeRecord[];
   status: 'ACTIVE' | 'RESTORED' | 'PARTIALLY_RESTORED';
+  kind: 'actions' | 'focus' | 'settings';
 }
+
+export type ChangeKind = 'firewall_rule' | 'priority' | 'suspended' | 'tuning' | 'setting' | 'scheduled_task' | 'qos_policy' | 'power_mode';
 
 export interface ActivePolicy {
   id: string;
   snapshotId: string;
-  kind: 'firewall_rule' | 'priority' | 'suspended';
+  kind: ChangeKind;
   description: string;
   createdAt: string;
 }
@@ -273,4 +278,136 @@ export interface DatabaseStats {
   auditCount: number;
   fileSizeBytes: number;
   dbPath: string;
+}
+
+export interface FocusOptions {
+  efficiencyMode: boolean;
+  lowerPriority: boolean;
+  lowIo: boolean;
+  lowMemory: boolean;
+  efficiencyCores: boolean;
+  preferGpu: boolean;
+  exclusions: string[];
+  powerMode: 'best_performance' | 'balanced' | 'best_efficiency' | null;
+  limitUploadApps: string[];
+  uploadLimitKbps: number | null;
+  blockApps: string[];
+}
+
+export interface FocusPreview {
+  appId: string;
+  appName: string;
+  executablePath: string;
+  focusProcessCount: number;
+  backgroundProcessCount: number;
+  skippedProtected: number;
+  skippedRestricted: number;
+  skippedExcluded: number;
+  hybridCpu: boolean;
+  efficiencyCoreCount: number;
+}
+
+export interface FocusStatus {
+  active: boolean;
+  snapshotId: string | null;
+  appId: string | null;
+  appName: string | null;
+  startedAt: string | null;
+  options: FocusOptions | null;
+  tunedProcesses: number;
+  failedProcesses: number;
+  gpuPreferenceSet: boolean;
+  stats: {
+    samples: number;
+    backgroundCpuBefore: number | null;
+    backgroundCpuDuring: number | null;
+    focusCpuDuring: number | null;
+  };
+  hybridCpu: boolean;
+}
+
+export interface StartupItem {
+  id: string;
+  name: string;
+  command: string;
+  executablePath: string | null;
+  company: string | null;
+  source: string;
+  sourceLabel: string;
+  enabled: boolean;
+  requiresAdmin: boolean;
+  runningNow: boolean;
+}
+
+export interface ScheduledTaskItem {
+  path: string;
+  name: string;
+  author: string | null;
+  state: string;
+  enabled: boolean;
+  triggers: string[];
+  actions: string[];
+  runsAtLogonOrBoot: boolean;
+}
+
+export interface SettingChangeResult {
+  snapshotId: string;
+  description: string;
+}
+
+export interface PrivacySetting {
+  id: string;
+  title: string;
+  description: string;
+  note: string | null;
+  location: string;
+  source: 'settings_app' | 'group_policy';
+  isPrivate: boolean;
+  currentValue: number | null;
+  requiresAdmin: boolean;
+}
+
+export interface TelemetryObservation {
+  hostname: string;
+  processes: string[];
+  samplesSeen: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface PrivacyEvidence {
+  since: string;
+  hostnamesKnown: number;
+  observations: TelemetryObservation[];
+}
+
+export interface PowerPlan {
+  guid: string;
+  name: string;
+  active: boolean;
+}
+
+export interface PowerState {
+  plans: PowerPlan[];
+  mode: 'best_efficiency' | 'balanced' | 'best_performance' | null;
+}
+
+export type CleanupCategory = 'user_temp' | 'windows_temp' | 'update_cache' | 'crash_dumps' | 'recycle_bin';
+
+export interface CategoryScan {
+  category: CleanupCategory;
+  title: string;
+  description: string;
+  requiresAdmin: boolean;
+  bytes: number;
+  files: number;
+  error: string | null;
+}
+
+export interface CleanResult {
+  category: CleanupCategory;
+  freedBytes: number;
+  deletedFiles: number;
+  skippedFiles: number;
+  error: string | null;
 }

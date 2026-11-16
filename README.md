@@ -2,7 +2,7 @@
 
 **See what your Windows PC is doing, and why.** TENREC is a local-first desktop app that links processes, network connections and resource use, flags suspicious behaviour with plain-language explanations, and lets you block or pause things with changes you can always undo.
 
-Version 0.2 · Windows 10 (19041+) / 11 · Tauri 2 + Rust + React
+Version 0.3 · Windows 10 (19041+) / 11 · Tauri 2 + Rust + React
 
 ## What it does
 
@@ -20,17 +20,48 @@ Version 0.2 · Windows 10 (19041+) / 11 · Tauri 2 + Rust + React
   - every change goes through a review dialog, is recorded in a local SQLite database, and can be undone, including after a restart
   - **Undo everything** also removes leftover `TENREC_RULE_*` firewall rules
 
+### Control
+
+- **Focus mode**: pick one app and give it priority.
+  - The focus app gets High priority, and its efficiency mode is turned off.
+  - Other apps you run get Windows efficiency mode and lower CPU, disk and memory priority. On hybrid CPUs they can be kept on the efficiency cores.
+  - Optionally, the focus app is set to use the high-performance GPU.
+  - Optionally, the Windows power mode is switched for the session.
+  - With admin rights, chosen apps can be blocked from the network or have their upload capped.
+  - Apps you exclude are left alone, along with core Windows processes. Processes that start during the session are handled too.
+  - Ending focus undoes everything. If TENREC closes unexpectedly, the next launch undoes it.
+- **Startup**:
+  - Turn startup apps on or off from the Run keys and Startup folders. This uses the same switch as Task Manager.
+  - Turn third-party scheduled tasks on or off. Windows' own `\Microsoft\` tasks are never shown or changed.
+- **Privacy**:
+  - Twelve settings, each writing the same value the Settings app or a documented Group Policy writes: advertising ID, tailored experiences, Start suggestions and tips, silent app installs, language list, app launch tracking, online speech, feedback requests, web results in Start, activity history, optional diagnostic data.
+  - A list of connections to Microsoft diagnostic endpoints, matched using the local Windows DNS cache.
+- **Maintenance**:
+  - Switch the power mode and power plan.
+  - Clean up your temp files, Windows temp files, Windows Update downloads, crash dumps and the Recycle Bin. A scan comes first, and each category needs confirmation.
+
+Every change in this section except file cleanup is recorded and can be undone from the Protection page.
+
 ## What it does not do (yet)
 
 These are limits of the current version, and the app says so wherever they apply:
 
 - **No per-process bandwidth.** Windows needs ETW for that.
-- **No hostname lookups.** TENREC sends no traffic of its own.
+- **No DNS queries of its own.** Hostnames come only from the Windows DNS cache. Some VPN or secure-DNS clients (Cloudflare WARP, for example) bypass that cache; then no hostnames are shown.
 - **No GPU utilisation, temperatures or fan data.**
 - **No malware detection.** The security rules are heuristics, and normal software can trigger them.
 - **Company names are not checked against signatures.** They are what the file claims.
 - **Partial data without admin rights.** Windows hides CPU and I/O for service and system processes unless TENREC runs as administrator. Those show as "n/a".
-- **Firewall actions need administrator rights.** Process priority and suspend work as a standard user for your own processes.
+- **Some actions need administrator rights:**
+  - firewall actions
+  - Focus network options
+  - all-users startup entries
+  - machine-wide privacy policies
+  - Windows temp and Update cleanup
+
+  Everything else works as a standard user.
+- **Upload limits only.** Windows can only limit an app's *outgoing* bandwidth this way. It cannot reserve download speed for the focus app.
+- **Deleted files cannot be restored.** Cleanup is the one irreversible action, which is why it always asks first.
 
 ## Run it
 
