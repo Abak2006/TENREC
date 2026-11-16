@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Activity, AppWindow, Cpu, Crosshair, EyeOff, Rocket, Gauge, Network, Settings, ShieldAlert, Undo2 } from 'lucide-react';
+import { Activity, AppWindow, Cpu, Crosshair, EyeOff, Rocket, Wrench, Gauge, Network, Settings, ShieldAlert, Undo2 } from 'lucide-react';
 import { ActionReviewProvider } from '@/components/action-review';
 import { Banner } from '@/components/common';
 import { ToastProvider } from '@/components/toast';
@@ -11,6 +11,7 @@ import { OverviewPage } from '@/pages/overview';
 import { FocusPage } from '@/pages/focus';
 import { StartupPage } from '@/pages/startup';
 import { PrivacyPage } from '@/pages/privacy';
+import { MaintenancePage } from '@/pages/maintenance';
 import { ProcessesPage } from '@/pages/processes';
 import { ApplicationsPage } from '@/pages/applications';
 import { NetworkPage } from '@/pages/network';
@@ -25,6 +26,7 @@ const NAV: { id: PageId; label: string; icon: React.ComponentType<{ className?: 
   { id: 'focus', label: 'Focus', icon: Crosshair },
   { id: 'startup', label: 'Startup', icon: Rocket },
   { id: 'privacy', label: 'Privacy', icon: EyeOff },
+  { id: 'maintenance', label: 'Maintenance', icon: Wrench },
   { id: 'processes', label: 'Processes', icon: Activity },
   { id: 'applications', label: 'Applications', icon: AppWindow },
   { id: 'network', label: 'Network', icon: Network },
@@ -129,6 +131,7 @@ function Content({ page }: { page: PageId }) {
       {page === 'focus' && <FocusPage />}
       {page === 'startup' && <StartupPage />}
       {page === 'privacy' && <PrivacyPage />}
+      {page === 'maintenance' && <MaintenancePage />}
       {page === 'processes' && <ProcessesPage />}
       {page === 'applications' && <ApplicationsPage />}
       {page === 'network' && <NetworkPage />}

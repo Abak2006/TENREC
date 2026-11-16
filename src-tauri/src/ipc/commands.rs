@@ -10,6 +10,7 @@ use crate::network::{ConnectionInfo, ListeningPortInfo, NetworkThroughput, TopDe
 use crate::persistence::{AuditEntry, DatabaseStats};
 use crate::processes::{ApplicationItem, ProcessItem};
 use crate::protection::process_ctrl::is_elevated;
+use crate::protection::types::{AppliedChange, ChangeRecord, ChangeStatus};
 use crate::protection::{ActionOutcome, ActivePolicy, ApplyResult, RestorationSnapshot, RestoreResult};
 use crate::security::{IncidentStatus, ProposedAction, SecurityIncident};
 use crate::system::SystemSnapshot;
@@ -285,4 +286,67 @@ pub fn set_privacy_setting(state: State<'_, AppState>, id: String, private: bool
 #[tauri::command]
 pub fn get_privacy_evidence(state: State<'_, AppState>) -> crate::controls::privacy::PrivacyEvidence {
     state.hub.privacy.snapshot()
+}
+
+#[tauri::command(async)]
+pub fn get_power_state() -> Result<crate::platform::power::PowerState, String> {
+    crate::platform::power::state()
+}
+
+#[tauri::command(async)]
+pub fn set_power_plan(state: State<'_, AppState>, guid: String) -> Result<SettingChangeResult, String> {
+    use crate::platform::power;
+    let current = power::state()?;
+    let plan = current.plans.iter().find(|p| p.guid.eq_ignore_ascii_case(&guid)).ok_or("That power plan does not exist.")?;
+    let previous = power::active_plan()?;
+    if previous.eq_ignore_ascii_case(&plan.guid) {
+        return Err("That plan is already active.".to_string());
+    }
+    power::set_plan(&plan.guid)?;
+    let change = ChangeRecord {
+        change: AppliedChange::PowerPlan { previous },
+        description: format!("Power plan set to {}", plan.name),
+        status: ChangeStatus::Active,
+        note: None,
+    };
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command(async)]
+pub fn set_power_mode(state: State<'_, AppState>, mode: String) -> Result<SettingChangeResult, String> {
+    use crate::platform::power;
+    let target = power::mode_from_name(&mode).ok_or("Unknown power mode.")?;
+    let previous = power::mode_guid().ok_or("This Windows version does not expose the power mode setting.")?;
+    if previous == target {
+        return Err("That power mode is already active.".to_string());
+    }
+    power::set_mode_guid(target)?;
+    let change = ChangeRecord {
+        change: AppliedChange::PowerMode { previous },
+        description: format!("Power mode set to {}", mode.replace('_', " ")),
+        status: ChangeStatus::Active,
+        note: None,
+    };
+    let description = change.description.clone();
+    Ok(SettingChangeResult { snapshot_id: state.protection.record_setting(change), description })
+}
+
+#[tauri::command(async)]
+pub fn scan_cleanup() -> Vec<crate::controls::cleanup::CategoryScan> {
+    crate::controls::cleanup::scan()
+}
+
+#[tauri::command(async)]
+pub fn run_cleanup(state: State<'_, AppState>, category: crate::controls::cleanup::Category) -> crate::controls::cleanup::CleanResult {
+    let r = crate::controls::cleanup::clean(category);
+    let details = format!(
+        "{} files, {} bytes freed, {} skipped{}",
+        r.deleted_files,
+        r.freed_bytes,
+        r.skipped_files,
+        r.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
+    );
+    let _ = state.protection.audit("cleanup", &format!("{category:?}"), &details, r.error.is_none());
+    r
 }

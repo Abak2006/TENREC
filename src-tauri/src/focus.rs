@@ -4,6 +4,8 @@
 // reversible scheduling hints. Every change is recorded in a Focus snapshot; ending the
 // session (or the next launch after a crash) undoes it.
 use crate::platform::registry::{self, Hive, RegValue};
+use crate::platform::{power, qos};
+use crate::protection::firewall;
 use crate::platform::tuning::{self, BackgroundTuning};
 use crate::processes::{ApplicationItem, ProcessItem};
 use crate::protection::guard;
@@ -35,6 +37,13 @@ pub struct FocusOptions {
     pub prefer_gpu: bool,
     /// Application ids left untouched (voice chat, music, ...).
     pub exclusions: Vec<String>,
+    /// Switch the Windows power mode while focused ("best_performance", ...).
+    pub power_mode: Option<String>,
+    /// Applications whose upload is capped during focus (needs admin).
+    pub limit_upload_apps: Vec<String>,
+    pub upload_limit_kbps: Option<u32>,
+    /// Applications blocked from the network during focus (needs admin).
+    pub block_apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,7 +225,20 @@ impl FocusManager {
             return Err(format!("Windows did not report a path for {}, so it cannot be the focus app.", app.name));
         }
 
+        let needs_admin = !options.limit_upload_apps.is_empty() || !options.block_apps.is_empty();
+        if needs_admin && !crate::protection::process_ctrl::is_elevated() {
+            return Err("Blocking apps or limiting upload needs administrator rights. Restart TENREC with \"Run as administrator\", or turn those options off.".to_string());
+        }
+        if !options.limit_upload_apps.is_empty() && options.upload_limit_kbps.is_none() {
+            return Err("Choose an upload limit.".to_string());
+        }
         let mut initial = Vec::new();
+        if let Err(e) = Self::apply_session_wide(sample, app, &options, &mut initial) {
+            // Undo whatever was already applied before reporting the failure.
+            let id = protection.record(SnapshotKind::Focus, format!("Focus mode (failed): {}", app.name), initial);
+            let _ = protection.restore_snapshot(&id);
+            return Err(e);
+        }
         let mut gpu_set = false;
         if options.prefer_gpu {
             let previous = registry::read(Hive::CurrentUser, GPU_PREF_KEY, &app.executable_path)?;
@@ -264,6 +286,38 @@ impl FocusManager {
         }
         self.on_sample(sample, protection);
         Ok(self.status())
+    }
+
+    /// Power mode, network blocks and upload limits: applied once at start.
+    fn apply_session_wide(sample: &Sample, app: &ApplicationItem, options: &FocusOptions, out: &mut Vec<ChangeRecord>) -> Result<(), String> {
+        let record = |change: AppliedChange, description: String| ChangeRecord { change, description, status: ChangeStatus::Active, note: None };
+        if let Some(mode) = options.power_mode.as_deref() {
+            let target = power::mode_from_name(mode).ok_or("Unknown power mode.")?;
+            let previous = power::mode_guid().ok_or("This Windows version does not expose the power mode setting.")?;
+            if previous != target {
+                power::set_mode_guid(target)?;
+                out.push(record(AppliedChange::PowerMode { previous }, format!("Power mode set to {}", mode.replace('_', " "))));
+            }
+        }
+        for id in &options.block_apps {
+            if id == &app.id {
+                return Err("The focus app cannot also be blocked.".to_string());
+            }
+            let Some(a) = sample.applications.iter().find(|a| &a.id == id) else { continue };
+            let rule_name = firewall::new_rule_name();
+            firewall::block_program(&rule_name, &a.executable_path).map_err(|e| format!("{}: {e}", a.name))?;
+            out.push(record(AppliedChange::FirewallRule { rule_name }, format!("{} blocked from the network during focus", a.name)));
+        }
+        if let Some(kbps) = options.upload_limit_kbps {
+            for id in &options.limit_upload_apps {
+                let Some(a) = sample.applications.iter().find(|a| &a.id == id) else { continue };
+                let exe = std::path::Path::new(&a.executable_path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                let name = qos::new_policy_name();
+                qos::limit_upload(&name, &exe, kbps).map_err(|e| format!("{}: {e}", a.name))?;
+                out.push(record(AppliedChange::QosPolicy { name }, format!("{} upload limited to {kbps} kbit/s", a.name)));
+            }
+        }
+        Ok(())
     }
 
     /// Ends the session and undoes everything it changed.

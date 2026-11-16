@@ -288,6 +288,10 @@ export interface FocusOptions {
   efficiencyCores: boolean;
   preferGpu: boolean;
   exclusions: string[];
+  powerMode: 'best_performance' | 'balanced' | 'best_efficiency' | null;
+  limitUploadApps: string[];
+  uploadLimitKbps: number | null;
+  blockApps: string[];
 }
 
 export interface FocusPreview {
@@ -375,4 +379,35 @@ export interface PrivacyEvidence {
   since: string;
   hostnamesKnown: number;
   observations: TelemetryObservation[];
+}
+
+export interface PowerPlan {
+  guid: string;
+  name: string;
+  active: boolean;
+}
+
+export interface PowerState {
+  plans: PowerPlan[];
+  mode: 'best_efficiency' | 'balanced' | 'best_performance' | null;
+}
+
+export type CleanupCategory = 'user_temp' | 'windows_temp' | 'update_cache' | 'crash_dumps' | 'recycle_bin';
+
+export interface CategoryScan {
+  category: CleanupCategory;
+  title: string;
+  description: string;
+  requiresAdmin: boolean;
+  bytes: number;
+  files: number;
+  error: string | null;
+}
+
+export interface CleanResult {
+  category: CleanupCategory;
+  freedBytes: number;
+  deletedFiles: number;
+  skippedFiles: number;
+  error: string | null;
 }

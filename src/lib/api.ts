@@ -1,6 +1,6 @@
 // Typed wrappers around the Tauri IPC commands in src-tauri/src/ipc/commands.rs.
 import type {
-  ActivePolicy, AppStatus, ApplicationItem, ApplyResult, AuditEntry, ConnectionInfo, DatabaseStats, FocusOptions, FocusPreview, FocusStatus, PrivacyEvidence, PrivacySetting, ScheduledTaskItem, SettingChangeResult, StartupItem,
+  ActivePolicy, AppStatus, ApplicationItem, ApplyResult, AuditEntry, ConnectionInfo, DatabaseStats, FocusOptions, FocusPreview, FocusStatus, CategoryScan, CleanResult, CleanupCategory, PowerState, PrivacyEvidence, PrivacySetting, ScheduledTaskItem, SettingChangeResult, StartupItem,
   HardwareCapabilityItem, HardwareDiagnostics, ListeningPortInfo, NetworkThroughput, ProcessItem,
   ProposedAction, RestorationSnapshot, RestoreResult, SecurityIncident, SystemSnapshot, TopDestination,
   WhatChangedItem,
@@ -62,6 +62,11 @@ export const api = {
   privacySettings: () => call<PrivacySetting[]>('get_privacy_settings'),
   setPrivacySetting: (id: string, isPrivate: boolean) => call<SettingChangeResult>('set_privacy_setting', { id, private: isPrivate }),
   privacyEvidence: () => call<PrivacyEvidence>('get_privacy_evidence'),
+  powerState: () => call<PowerState>('get_power_state'),
+  setPowerPlan: (guid: string) => call<SettingChangeResult>('set_power_plan', { guid }),
+  setPowerMode: (mode: string) => call<SettingChangeResult>('set_power_mode', { mode }),
+  scanCleanup: () => call<CategoryScan[]>('scan_cleanup'),
+  runCleanup: (category: CleanupCategory) => call<CleanResult>('run_cleanup', { category }),
   undoSnapshot: (snapshotId: string) => call<RestoreResult>('restore_snapshot', { snapshotId }),
   purgeTelemetry: (retentionHours: number) => call<number>('purge_old_telemetry', { retentionHours }),
 };

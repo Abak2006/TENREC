@@ -16,6 +16,12 @@ pub enum AppliedChange {
     Registry { hive: Hive, key: String, name: String, previous: Option<RegValue> },
     /// A third-party scheduled task TENREC enabled or disabled.
     ScheduledTask { path: String, was_enabled: bool },
+    /// A Policy-based QoS upload limit (ActiveStore: also cleared by a reboot).
+    QosPolicy { name: String },
+    /// Power mode overlay GUID that was active before.
+    PowerMode { previous: String },
+    /// Power plan GUID that was active before.
+    PowerPlan { previous: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

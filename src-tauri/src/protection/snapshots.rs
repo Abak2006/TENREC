@@ -82,6 +82,9 @@ fn undo(change: &AppliedChange) -> Result<Option<String>, String> {
         }
         AppliedChange::Registry { hive, key, name, previous } => registry::restore(*hive, key, name, previous).map(|_| None),
         AppliedChange::ScheduledTask { path, was_enabled } => crate::controls::tasks::restore(path, *was_enabled).map(|_| None),
+        AppliedChange::QosPolicy { name } => crate::platform::qos::remove(name).map(|_| None),
+        AppliedChange::PowerMode { previous } => crate::platform::power::set_mode_guid(previous).map(|_| None),
+        AppliedChange::PowerPlan { previous } => crate::platform::power::set_plan(previous).map(|_| None),
     }
 }
 
@@ -93,6 +96,8 @@ fn change_kind(c: &AppliedChange) -> &'static str {
         AppliedChange::ProcessTuning { .. } => "tuning",
         AppliedChange::Registry { .. } => "setting",
         AppliedChange::ScheduledTask { .. } => "scheduled_task",
+        AppliedChange::QosPolicy { .. } => "qos_policy",
+        AppliedChange::PowerMode { .. } | AppliedChange::PowerPlan { .. } => "power_mode",
     }
 }
 

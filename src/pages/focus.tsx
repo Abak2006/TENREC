@@ -19,6 +19,10 @@ const DEFAULT_OPTIONS: FocusOptions = {
   efficiencyCores: false,
   preferGpu: false,
   exclusions: [],
+  powerMode: null,
+  limitUploadApps: [],
+  uploadLimitKbps: 2000,
+  blockApps: [],
 };
 
 function loadOptions(): FocusOptions {
@@ -38,7 +42,8 @@ function saveOptions(o: FocusOptions) {
   }
 }
 
-const TOGGLES: { key: keyof Omit<FocusOptions, 'exclusions'>; label: string; detail: string; needsHybrid?: boolean }[] = [
+type BoolKey = 'efficiencyMode' | 'lowerPriority' | 'lowIo' | 'lowMemory' | 'efficiencyCores' | 'preferGpu';
+const TOGGLES: { key: BoolKey; label: string; detail: string; needsHybrid?: boolean }[] = [
   { key: 'efficiencyMode', label: 'Efficiency mode for background apps', detail: 'The same EcoQoS setting Task Manager uses. Windows runs them at lower clock speeds and schedules them last.' },
   { key: 'lowerPriority', label: 'Lower background priority', detail: 'Normal and above-normal background processes drop to Below normal. Nothing is ever raised except the focus app.' },
   { key: 'lowIo', label: 'Low disk priority for background apps', detail: 'Their file reads and writes wait behind the focus app’s.' },
@@ -139,6 +144,7 @@ function Setup() {
   const eq = exclQuery.trim().toLowerCase();
   const exclList = candidates.filter((a) => a.id !== appId && (!eq || a.name.toLowerCase().includes(eq)));
   const hybrid = status?.hybridCpu ?? false;
+  const elevated = useAppData((s) => s.status?.elevated ?? false);
 
   const toggleExclusion = (id: string) =>
     setOptions((o) => ({ ...o, exclusions: o.exclusions.includes(id) ? o.exclusions.filter((x) => x !== id) : [...o.exclusions, id] }));
@@ -223,7 +229,58 @@ function Setup() {
           </ul>
         </Section>
 
-        <Section title="4. Review and start">
+        <Section title="4. Power and network (optional)" description="Network options need administrator rights. Upload limits only cover outgoing traffic; Windows cannot reserve download speed for one app.">
+          <div className="flex flex-col gap-3">
+            <label className="flex items-center justify-between gap-3">
+              <span>
+                <span className="font-medium">Power mode during focus</span>
+                <span className="block text-muted-foreground">Restored when focus ends.</span>
+              </span>
+              <select
+                className="h-8 rounded-md border border-input bg-background px-2"
+                value={options.powerMode ?? ''}
+                onChange={(e) => setOptions((o) => ({ ...o, powerMode: (e.target.value || null) as FocusOptions['powerMode'] }))}
+              >
+                <option value="">Don't change</option>
+                <option value="best_performance">Best performance</option>
+                <option value="balanced">Balanced</option>
+              </select>
+            </label>
+            <AppPicker
+              label="Block from the network during focus"
+              detail="Launchers, cloud sync and updaters you don't need right now."
+              apps={exclList}
+              selected={options.blockApps}
+              onChange={(blockApps) => setOptions((o) => ({ ...o, blockApps }))}
+            />
+            <AppPicker
+              label="Limit upload during focus"
+              detail="Stops background uploads from causing lag in games and calls."
+              apps={exclList}
+              selected={options.limitUploadApps}
+              onChange={(limitUploadApps) => setOptions((o) => ({ ...o, limitUploadApps }))}
+            />
+            {options.limitUploadApps.length > 0 && (
+              <label className="flex items-center gap-2">
+                Limit each to
+                <input
+                  type="number"
+                  min={64}
+                  step={100}
+                  className="h-8 w-24 rounded-md border border-input bg-background px-2 num"
+                  value={options.uploadLimitKbps ?? 2000}
+                  onChange={(e) => setOptions((o) => ({ ...o, uploadLimitKbps: Math.max(64, Number(e.target.value) || 64) }))}
+                />
+                kbit/s
+              </label>
+            )}
+            {(options.blockApps.length > 0 || options.limitUploadApps.length > 0) && !elevated && (
+              <Banner tone="warn" title="Administrator rights needed">Focus will not start with network options unless TENREC runs as administrator.</Banner>
+            )}
+          </div>
+        </Section>
+
+        <Section title="5. Review and start">
           {!selected ? (
             <p className="text-muted-foreground">Choose an app first.</p>
           ) : previewError ? (
@@ -247,6 +304,45 @@ function Setup() {
           )}
         </Section>
       </div>
+    </div>
+  );
+}
+
+function AppPicker({ label, detail, apps, selected, onChange }: {
+  label: string;
+  detail: string;
+  apps: { id: string; name: string }[];
+  selected: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = React.useState(selected.length > 0);
+  const names = apps.filter((a) => selected.includes(a.id)).map((a) => a.name);
+  return (
+    <div>
+      <button type="button" className="flex w-full items-center justify-between gap-3 text-left" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span>
+          <span className="font-medium">{label}</span>
+          <span className="block text-muted-foreground">{names.length ? names.join(', ') : detail}</span>
+        </span>
+        <span className="text-xs text-primary">{open ? 'Done' : 'Choose'}</span>
+      </button>
+      {open && (
+        <ul className="mt-2 max-h-36 overflow-y-auto rounded-md border p-2">
+          {apps.slice(0, 150).map((a) => (
+            <li key={a.id}>
+              <label className="flex cursor-pointer items-center gap-2 py-0.5">
+                <input
+                  type="checkbox"
+                  className="size-4 accent-[var(--primary)]"
+                  checked={selected.includes(a.id)}
+                  onChange={() => onChange(selected.includes(a.id) ? selected.filter((x) => x !== a.id) : [...selected, a.id])}
+                />
+                <span className="truncate">{a.name}</span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
