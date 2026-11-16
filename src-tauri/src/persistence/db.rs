@@ -63,6 +63,8 @@ impl Database {
         // Execute table schemas
         conn.execute_batch(CREATE_SYSTEM_SAMPLES_TABLE)?;
         conn.execute_batch(CREATE_PROTECTION_SNAPSHOTS_TABLE)?;
+        // v0.3: snapshot kind. Ignore the error when the column already exists.
+        let _ = conn.execute("ALTER TABLE protection_snapshots ADD COLUMN kind TEXT NOT NULL DEFAULT 'actions'", []);
         conn.execute_batch(CREATE_AUDIT_LOG_TABLE)?;
 
         Ok(Self {
@@ -199,27 +201,29 @@ impl Database {
 
     pub fn save_snapshot(&self, snap: &RestorationSnapshot) -> Result<()> {
         let changes = serde_json::to_string(&snap.changes).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let kind = serde_json::to_value(snap.kind).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         let status = serde_json::to_value(snap.status)
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
         self.conn.lock_safe().execute(
-            "INSERT INTO protection_snapshots (id, timestamp, title, status, changes_json) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO protection_snapshots (id, timestamp, title, status, changes_json, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET status = excluded.status, changes_json = excluded.changes_json",
-            params![snap.id, snap.timestamp, snap.title, status, changes],
+            params![snap.id, snap.timestamp, snap.title, status, changes, kind],
         )?;
         Ok(())
     }
 
     pub fn load_snapshots(&self) -> Result<Vec<RestorationSnapshot>> {
         let conn = self.conn.lock_safe();
-        let mut stmt = conn.prepare("SELECT id, timestamp, title, status, changes_json FROM protection_snapshots ORDER BY timestamp")?;
+        let mut stmt = conn.prepare("SELECT id, timestamp, title, status, changes_json, kind FROM protection_snapshots ORDER BY timestamp")?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, timestamp, title, status, changes_json) = row?;
+            let (id, timestamp, title, status, changes_json, kind) = row?;
+            let kind = serde_json::from_value(serde_json::Value::String(kind)).unwrap_or_default();
             // Skip rows written by an incompatible version rather than failing startup.
             let (Ok(changes), Ok(status)) = (
                 serde_json::from_str(&changes_json),
@@ -228,7 +232,7 @@ impl Database {
                 log::warn!("Skipping unreadable snapshot {id}");
                 continue;
             };
-            out.push(RestorationSnapshot { id, timestamp, title, changes, status });
+            out.push(RestorationSnapshot { id, timestamp, title, changes, status, kind });
         }
         Ok(out)
     }

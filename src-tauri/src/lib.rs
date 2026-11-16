@@ -1,10 +1,12 @@
 // TENREC - Native desktop application core
 pub mod baseline;
 pub mod correlation;
+pub mod focus;
 pub mod hardware;
 pub mod ipc;
 pub mod network;
 pub mod persistence;
+pub mod platform;
 pub mod processes;
 pub mod protection;
 pub mod security;
@@ -46,7 +48,12 @@ pub fn run() {
         .manage(AppState::new(db, storage_error))
         .setup(|app| {
             let state = app.state::<AppState>();
-            state.hub.start(state.db.clone());
+            let recovered = state.protection.recover_interrupted_focus();
+            if recovered > 0 {
+                log::warn!("Undid {recovered} focus session(s) that were still active at the last exit");
+            }
+            let (focus, protection) = (state.focus.clone(), state.protection.clone());
+            state.hub.start(state.db.clone(), move |sample| focus.on_sample(sample, &protection));
             log::info!("TENREC started (elevated: {})", protection::process_ctrl::is_elevated());
             Ok(())
         })
@@ -75,6 +82,10 @@ pub fn run() {
             get_audit_log,
             get_database_stats,
             purge_old_telemetry,
+            get_focus_status,
+            preview_focus,
+            start_focus,
+            stop_focus,
         ])
         .run(tauri::generate_context!())
         .expect("error while running TENREC");

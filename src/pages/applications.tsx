@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Ban } from 'lucide-react';
+import { Ban, Crosshair } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DataTable, EmptyState, PageHeader, SearchInput, SortHeader, Tag, Td, Th } from '@/components/common';
 import { sortBy, useSort } from '@/lib/sort';
@@ -7,6 +7,7 @@ import { useActionReview } from '@/components/action-review';
 import { api } from '@/lib/api';
 import { formatBytes, formatPercent, formatRate } from '@/lib/format';
 import { useAppData } from '@/lib/store';
+import { setPendingFocusApp, useNavigate } from '@/lib/navigation';
 import type { ApplicationItem } from '@/lib/types';
 
 type Key = 'name' | 'processes' | 'cpu' | 'memory' | 'io' | 'connections';
@@ -27,6 +28,7 @@ export function ApplicationsPage() {
   const [onlineOnly, setOnlineOnly] = React.useState(false);
   const { sort, toggle } = useSort<Key>({ key: 'cpu', dir: 'desc' });
   const review = useActionReview();
+  const navigate = useNavigate();
 
   const q = query.trim().toLowerCase();
   const rows = sortBy(
@@ -89,16 +91,28 @@ export function ApplicationsPage() {
                 <Td align="right">{a.connectionCount || '–'}</Td>
                 <Td><Tag tone={b.tone} title={b.title}>{b.label}</Tag></Td>
                 <Td align="right">
+                  <div className="flex justify-end gap-1 opacity-60 group-hover:opacity-100 group-focus-within:opacity-100">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={!a.executablePath}
+                    onClick={() => {
+                      setPendingFocusApp(a.id);
+                      navigate('focus');
+                    }}
+                  >
+                    <Crosshair /> Focus
+                  </Button>
                   <Button
                     size="sm"
                     variant="ghost"
                     disabled={!a.executablePath}
                     title={a.executablePath ? undefined : 'Windows did not report a path for this application'}
-                    className="opacity-60 group-hover:opacity-100 group-focus-within:opacity-100"
                     onClick={() => review(async () => [await api.prepareAppBlock(a.id)])}
                   >
                     <Ban /> Block internet
                   </Button>
+                  </div>
                 </Td>
               </tr>
             );

@@ -10,9 +10,18 @@ import { useToast } from '@/components/toast';
 import { api } from '@/lib/api';
 import { formatRelative, formatTime } from '@/lib/format';
 import { store, useAppData } from '@/lib/store';
-import type { RestoreResult } from '@/lib/types';
+import type { ChangeKind, RestoreResult } from '@/lib/types';
 
-const KIND_LABEL = { firewall_rule: 'Firewall', priority: 'Priority', suspended: 'Suspended' } as const;
+const KIND_LABEL: Record<ChangeKind, string> = {
+  firewall_rule: 'Firewall',
+  priority: 'Priority',
+  suspended: 'Suspended',
+  tuning: 'Focus',
+  setting: 'Setting',
+  scheduled_task: 'Task',
+  qos_policy: 'Upload limit',
+  power_mode: 'Power',
+};
 
 export function ProtectionPage() {
   const policies = useAppData((s) => s.policies);
@@ -104,7 +113,10 @@ export function ProtectionPage() {
                     )}
                   </div>
                   <ul className="mt-1.5 flex flex-col gap-0.5">
-                    {s.changes.map((c, i) => (
+                    {s.kind === 'focus' && s.changes.length > 6 && (
+                      <li className="text-sm text-muted-foreground">{s.changes.length} process and setting changes; first 6 shown</li>
+                    )}
+                    {(s.kind === 'focus' ? s.changes.slice(0, 6) : s.changes).map((c, i) => (
                       <li key={i} className="flex items-baseline gap-2 text-sm">
                         <span className={c.status === 'RESTORED' ? 'text-muted-foreground line-through' : ''}>{c.description}</span>
                         {c.status === 'RESTORE_FAILED' && <Tag tone="danger">undo failed</Tag>}

@@ -130,7 +130,8 @@ impl TelemetryHub {
 
     /// Starts the sampling thread once. Panics inside a cycle are caught and reported
     /// through `last_error` so one bad sample cannot stop telemetry.
-    pub fn start(self: &Arc<Self>, db: Arc<Database>) {
+    /// `after_sample` runs on the sampler thread after each successful sample (Focus mode).
+    pub fn start(self: &Arc<Self>, db: Arc<Database>, after_sample: impl Fn(&Sample) + Send + 'static) {
         if self.running.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -148,6 +149,9 @@ impl TelemetryHub {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hub.tick(&mut collectors)));
                     match result {
                         Ok(sample) => {
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| after_sample(&sample))).is_err() {
+                                log::error!("Post-sample handler panicked; continuing");
+                            }
                             if last_persist.map(|t| t.elapsed() >= PERSIST_INTERVAL).unwrap_or(true) {
                                 last_persist = Some(Instant::now());
                                 if let (Some(s), Some(t)) = (&sample.system, &sample.throughput) {

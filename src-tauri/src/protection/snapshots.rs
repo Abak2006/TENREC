@@ -1,5 +1,6 @@
 // TENREC - Apply approved actions, record undo snapshots, roll back
 use crate::persistence::Database;
+use crate::platform::{registry, tuning};
 use crate::protection::types::*;
 use crate::protection::{firewall, guard, process_ctrl};
 use crate::security::types::{ActionTarget, ProposedAction};
@@ -72,6 +73,14 @@ fn undo(change: &AppliedChange) -> Result<Option<String>, String> {
             }
             process_ctrl::resume_process(*pid).map(|_| None)
         }
+        AppliedChange::ProcessTuning { pid, process_name, creation_time, previous } => {
+            if process_ctrl::verify_identity(*pid, *creation_time, process_name).is_err() {
+                // Scheduling hints die with the process; nothing to restore.
+                return Ok(Some(String::new()));
+            }
+            tuning::restore(*pid, previous).map(|_| None)
+        }
+        AppliedChange::Registry { hive, key, name, previous } => registry::restore(*hive, key, name, previous).map(|_| None),
     }
 }
 
@@ -80,6 +89,8 @@ fn change_kind(c: &AppliedChange) -> &'static str {
         AppliedChange::FirewallRule { .. } => "firewall_rule",
         AppliedChange::Priority { .. } => "priority",
         AppliedChange::Suspended { .. } => "suspended",
+        AppliedChange::ProcessTuning { .. } => "tuning",
+        AppliedChange::Registry { .. } => "setting",
     }
 }
 
@@ -101,6 +112,10 @@ impl ProtectionManager {
         }
     }
 
+    pub fn audit(&self, action_type: &str, target: &str, details: &str, success: bool) -> rusqlite::Result<()> {
+        self.db.record_audit_entry("user", action_type, target, details, success)
+    }
+
     pub fn get_snapshots(&self) -> Vec<RestorationSnapshot> {
         let mut list = self.snapshots.lock_safe().clone();
         list.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -110,7 +125,8 @@ impl ProtectionManager {
     pub fn get_active_policies(&self) -> Vec<ActivePolicy> {
         let snaps = self.snapshots.lock_safe();
         let mut out = Vec::new();
-        for s in snaps.iter() {
+        // Focus sessions are shown on the Focus page as one session, not per process.
+        for s in snaps.iter().filter(|s| s.kind != SnapshotKind::Focus) {
             for (i, c) in s.changes.iter().enumerate() {
                 if c.status != ChangeStatus::Restored {
                     out.push(ActivePolicy {
@@ -158,6 +174,7 @@ impl ProtectionManager {
             title: format!("{} change(s) applied", changes.len()),
             changes,
             status: SnapshotStatus::Active,
+            kind: SnapshotKind::Actions,
         };
         self.persist(&snap);
         let id = snap.id.clone();
@@ -178,9 +195,9 @@ impl ProtectionManager {
             match res {
                 Ok(note) => {
                     c.status = ChangeStatus::Restored;
-                    c.note = note.clone();
+                    c.note = note.clone().filter(|n| !n.is_empty());
                     result.restored += 1;
-                    if let Some(n) = note {
+                    if let Some(n) = note.filter(|n| !n.is_empty()) {
                         result.messages.push(n);
                     }
                 }
@@ -198,6 +215,52 @@ impl ProtectionManager {
             SnapshotStatus::PartiallyRestored
         };
         self.persist(snap);
+    }
+
+    /// Records changes made outside the review dialog (focus sessions, settings) as a
+    /// new snapshot of the given kind and returns its id.
+    pub fn record(&self, kind: SnapshotKind, title: String, changes: Vec<ChangeRecord>) -> String {
+        let snap = RestorationSnapshot {
+            id: format!("snap_{}", uuid::Uuid::new_v4().simple()),
+            timestamp: Utc::now().to_rfc3339(),
+            title,
+            changes,
+            status: SnapshotStatus::Active,
+            kind,
+        };
+        self.persist(&snap);
+        let id = snap.id.clone();
+        self.snapshots.lock_safe().push(snap);
+        id
+    }
+
+    /// Adds changes to an existing active snapshot (a running focus session).
+    pub fn append(&self, snapshot_id: &str, changes: Vec<ChangeRecord>) {
+        if changes.is_empty() {
+            return;
+        }
+        let mut snaps = self.snapshots.lock_safe();
+        if let Some(s) = snaps.iter_mut().find(|s| s.id == snapshot_id) {
+            s.changes.extend(changes);
+            s.status = SnapshotStatus::Active;
+            self.persist(s);
+        }
+    }
+
+    /// Undoes focus sessions that were still active when TENREC last exited
+    /// (crash, kill or reboot). Returns how many sessions were cleaned up.
+    pub fn recover_interrupted_focus(&self) -> usize {
+        let ids: Vec<String> = self
+            .snapshots
+            .lock_safe()
+            .iter()
+            .filter(|s| s.kind == SnapshotKind::Focus && s.status != SnapshotStatus::Restored)
+            .map(|s| s.id.clone())
+            .collect();
+        for id in &ids {
+            let _ = self.restore_snapshot(id);
+        }
+        ids.len()
     }
 
     pub fn restore_snapshot(&self, snapshot_id: &str) -> Result<RestoreResult, String> {

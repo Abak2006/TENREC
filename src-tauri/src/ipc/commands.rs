@@ -3,6 +3,7 @@
 // Read commands return the latest background sample. Commands that change the system
 // accept only action IDs created by the backend, never raw targets from the webview.
 use crate::correlation::WhatChangedItem;
+use crate::focus::{FocusOptions, FocusPreview, FocusStatus};
 use crate::hardware::{HardwareCapabilityItem, HardwareDiagnostics, HardwareRegistry};
 use crate::ipc::state::AppState;
 use crate::network::{ConnectionInfo, ListeningPortInfo, NetworkThroughput, TopDestination};
@@ -160,7 +161,46 @@ pub fn restore_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Resu
 
 #[tauri::command(async)]
 pub fn restore_all(state: State<'_, AppState>) -> RestoreResult {
+    // Undo everything includes a running focus session; stop tracking it first so it
+    // does not keep adding changes to a restored snapshot.
+    state.focus.forget();
     state.protection.restore_all()
+}
+
+#[tauri::command]
+pub fn get_focus_status(state: State<'_, AppState>) -> FocusStatus {
+    state.focus.status()
+}
+
+fn find_app(sample: &crate::telemetry::Sample, app_id: &str) -> Result<ApplicationItem, String> {
+    sample
+        .applications
+        .iter()
+        .find(|a| a.id == app_id)
+        .cloned()
+        .ok_or_else(|| "That application is no longer running.".to_string())
+}
+
+#[tauri::command(async)]
+pub fn preview_focus(state: State<'_, AppState>, app_id: String, options: FocusOptions) -> Result<FocusPreview, String> {
+    let sample = state.hub.latest();
+    let app = find_app(&sample, &app_id)?;
+    Ok(state.focus.preview(&sample, &app, &options))
+}
+
+#[tauri::command(async)]
+pub fn start_focus(state: State<'_, AppState>, app_id: String, options: FocusOptions) -> Result<FocusStatus, String> {
+    if options.exclusions.len() > 500 {
+        return Err("Too many exclusions.".to_string());
+    }
+    let sample = state.hub.latest();
+    let app = find_app(&sample, &app_id)?;
+    state.focus.start(&sample, &app, options, &state.protection)
+}
+
+#[tauri::command(async)]
+pub fn stop_focus(state: State<'_, AppState>) -> Result<RestoreResult, String> {
+    state.focus.stop(&state.protection)
 }
 
 static DIAGNOSTICS: OnceLock<HardwareDiagnostics> = OnceLock::new();

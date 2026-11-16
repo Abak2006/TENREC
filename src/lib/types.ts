@@ -193,7 +193,7 @@ export interface WhatChangedItem {
 }
 
 export interface ChangeRecord {
-  change: { kind: 'firewall_rule' | 'priority' | 'suspended' };
+  change: { kind: ChangeKind };
   description: string;
   status: 'ACTIVE' | 'RESTORED' | 'RESTORE_FAILED';
   note: string | null;
@@ -205,12 +205,15 @@ export interface RestorationSnapshot {
   title: string;
   changes: ChangeRecord[];
   status: 'ACTIVE' | 'RESTORED' | 'PARTIALLY_RESTORED';
+  kind: 'actions' | 'focus' | 'settings';
 }
+
+export type ChangeKind = 'firewall_rule' | 'priority' | 'suspended' | 'tuning' | 'setting' | 'scheduled_task' | 'qos_policy' | 'power_mode';
 
 export interface ActivePolicy {
   id: string;
   snapshotId: string;
-  kind: 'firewall_rule' | 'priority' | 'suspended';
+  kind: ChangeKind;
   description: string;
   createdAt: string;
 }
@@ -273,4 +276,46 @@ export interface DatabaseStats {
   auditCount: number;
   fileSizeBytes: number;
   dbPath: string;
+}
+
+export interface FocusOptions {
+  efficiencyMode: boolean;
+  lowerPriority: boolean;
+  lowIo: boolean;
+  lowMemory: boolean;
+  efficiencyCores: boolean;
+  preferGpu: boolean;
+  exclusions: string[];
+}
+
+export interface FocusPreview {
+  appId: string;
+  appName: string;
+  executablePath: string;
+  focusProcessCount: number;
+  backgroundProcessCount: number;
+  skippedProtected: number;
+  skippedRestricted: number;
+  skippedExcluded: number;
+  hybridCpu: boolean;
+  efficiencyCoreCount: number;
+}
+
+export interface FocusStatus {
+  active: boolean;
+  snapshotId: string | null;
+  appId: string | null;
+  appName: string | null;
+  startedAt: string | null;
+  options: FocusOptions | null;
+  tunedProcesses: number;
+  failedProcesses: number;
+  gpuPreferenceSet: boolean;
+  stats: {
+    samples: number;
+    backgroundCpuBefore: number | null;
+    backgroundCpuDuring: number | null;
+    focusCpuDuring: number | null;
+  };
+  hybridCpu: boolean;
 }

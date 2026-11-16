@@ -152,7 +152,7 @@ export function SeverityBadge({ severity }: { severity: Severity }) {
   );
 }
 
-export function Tag({ children, tone = 'neutral', title }: { children: React.ReactNode; tone?: 'neutral' | 'ok' | 'warn' | 'danger' | 'accent'; title?: string }) {
+export function Tag({ children, tone = 'neutral', title, className }: { children: React.ReactNode; tone?: 'neutral' | 'ok' | 'warn' | 'danger' | 'accent'; title?: string; className?: string }) {
   return (
     <span
       title={title}
@@ -163,6 +163,7 @@ export function Tag({ children, tone = 'neutral', title }: { children: React.Rea
         tone === 'warn' && 'bg-warn/15 text-warn',
         tone === 'danger' && 'bg-danger/15 text-danger',
         tone === 'accent' && 'bg-primary/12 text-primary',
+        className,
       )}
     >
       {children}

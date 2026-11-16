@@ -1,4 +1,6 @@
 // TENREC - Protection & restoration types
+use crate::platform::registry::{Hive, RegValue};
+use crate::platform::tuning::TuningState;
 use serde::{Deserialize, Serialize};
 
 /// A change TENREC made to the system, with everything needed to undo it.
@@ -8,6 +10,22 @@ pub enum AppliedChange {
     FirewallRule { rule_name: String },
     Priority { pid: u32, process_name: String, creation_time: u64, previous_class: u32 },
     Suspended { pid: u32, process_name: String, creation_time: u64 },
+    /// Scheduling hints changed by Focus mode; `previous` holds only fields that were changed.
+    ProcessTuning { pid: u32, process_name: String, creation_time: u64, previous: TuningState },
+    /// A registry value TENREC wrote; `previous: None` means it did not exist before.
+    Registry { hive: Hive, key: String, name: String, previous: Option<RegValue> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotKind {
+    /// Approved actions from the review dialog.
+    #[default]
+    Actions,
+    /// Everything a focus session changed; undone when the session ends.
+    Focus,
+    /// Windows settings changes (startup, privacy, power).
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +61,8 @@ pub struct RestorationSnapshot {
     pub title: String,
     pub changes: Vec<ChangeRecord>,
     pub status: SnapshotStatus,
+    #[serde(default)]
+    pub kind: SnapshotKind,
 }
 
 /// A change that is currently in effect (derived from active snapshot records).
@@ -51,7 +71,7 @@ pub struct RestorationSnapshot {
 pub struct ActivePolicy {
     pub id: String,
     pub snapshot_id: String,
-    pub kind: String, // "firewall_rule" | "priority" | "suspended"
+    pub kind: String, // see change_kind() in snapshots.rs
     pub description: String,
     pub created_at: String,
 }

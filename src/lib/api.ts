@@ -1,6 +1,6 @@
 // Typed wrappers around the Tauri IPC commands in src-tauri/src/ipc/commands.rs.
 import type {
-  ActivePolicy, AppStatus, ApplicationItem, ApplyResult, AuditEntry, ConnectionInfo, DatabaseStats,
+  ActivePolicy, AppStatus, ApplicationItem, ApplyResult, AuditEntry, ConnectionInfo, DatabaseStats, FocusOptions, FocusPreview, FocusStatus,
   HardwareCapabilityItem, HardwareDiagnostics, ListeningPortInfo, NetworkThroughput, ProcessItem,
   ProposedAction, RestorationSnapshot, RestoreResult, SecurityIncident, SystemSnapshot, TopDestination,
   WhatChangedItem,
@@ -51,5 +51,9 @@ export const api = {
   capabilities: () => call<HardwareCapabilityItem[]>('get_hardware_registry'),
   auditLog: () => call<AuditEntry[]>('get_audit_log'),
   databaseStats: () => call<DatabaseStats>('get_database_stats'),
+  focusStatus: () => call<FocusStatus>('get_focus_status'),
+  previewFocus: (appId: string, options: FocusOptions) => call<FocusPreview>('preview_focus', { appId, options }),
+  startFocus: (appId: string, options: FocusOptions) => call<FocusStatus>('start_focus', { appId, options }),
+  stopFocus: () => call<RestoreResult>('stop_focus'),
   purgeTelemetry: (retentionHours: number) => call<number>('purge_old_telemetry', { retentionHours }),
 };
